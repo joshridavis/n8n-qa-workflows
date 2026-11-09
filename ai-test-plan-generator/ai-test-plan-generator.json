@@ -1,0 +1,744 @@
+{
+  "name": "AI Test Plan Generator – Jira",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## AI Test Plan Generator – Jira\n\n### How it works\nEvery 30 minutes it picks Jira requirements (stories, tasks) that reached your \"ready for QA\" status and writes a software test plan for each.\n1. A model drafts the plan as JSON: summary, objective, in and out of scope, environment, preconditions and up to 10 prioritised tests.\n2. A second call reviews it against the requirement and fixes only real problems.\n3. Code checks it (tests present, no duplicates, priority and weight 1-3, test limit) before anything is created.\n4. Creates the test plan issue, links it to the requirement, comments on the requirement and labels it.\n\nNo valid plan: the requirement gets `ai-needs-human` and nothing is created.\n\n### Setup\n1. Add **Jira Software Cloud API** and **OpenAI** credentials. Select each on one node; n8n applies it to the other nodes.\n2. In **⚙️ Config** set your Jira URL, JQL, and the project, issue type and link type for test plans.\n3. Optional: `testIssueKey` + **Test workflow**.\n4. Activate (n8n 2.x: **Publish**). Pairs with *AI Test Case Generator*.\n\n### Customization\n- `extraRequirementFields`: also read an acceptance-criteria custom field.\n- `statusAfterCreate: 'Done'`: hand each plan straight to the test case generator.",
+        "height": 839,
+        "width": 500
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -560,
+        -420
+      ],
+      "id": "903b3050-2734-5d60-8fe2-d8cb6342d0d7",
+      "name": "📘 About"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -100
+      ],
+      "id": "06df8580-6b07-5ca9-af45-bd7df9bdf24a",
+      "name": "▶ Test run"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 30
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        0,
+        100
+      ],
+      "id": "5f06cf8b-6387-584c-b84d-c876fbb02c62",
+      "name": "⏰ Every 30 min"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ⚙️ CONFIG — the only node you need to edit.\nconst config = {\n  // Your Jira Cloud site. Must match the Jira credential.\n  jiraBaseUrl: 'https://your-company.atlassian.net',\n\n  // Requirement tickets (stories, tasks, epics…) that are ready for a test plan.\n  // Keep the label filter: it stops a ticket getting two test plans.\n  jql: 'project = DEV AND issuetype in (Story, Task) AND status = \"Ready for QA\" AND (labels is EMPTY OR labels not in (ai-test-plan-created, ai-needs-human)) ORDER BY updated ASC',\n  maxIssuesPerRun: 3,\n\n  // Extra fields that hold requirements text, read together with the description.\n  // e.g. ['customfield_10050'] for an \"Acceptance criteria\" field. [] = description only.\n  extraRequirementFields: [],\n\n  testPlan: {\n    projectKey: 'QA',                // project where test plans are created\n    issueType: 'Test Plan',          // Xray \"Test Plan\", or e.g. 'Task' without Xray\n    summaryPrefix: 'Test Plan: ',\n    linkType: 'Relates',             // issue link type between the test plan and the requirement\n    copyAssignee: true,              // assign the plan to the requirement's assignee\n    statusAfterCreate: '',           // e.g. 'Done' to hand straight to \"AI Test Case Generator\"; '' = leave for review\n  },\n\n  labels: {\n    requirementDone: 'ai-test-plan-created', // added to the requirement ticket\n    testPlan: 'ai-test-plan',                // added to the created test plan\n    needsHuman: 'ai-needs-human',            // added to the requirement when no valid plan could be made\n  },\n\n  maxTests: 10,\n  exitCriteria: [\n    'All priority 3 test cases passed.',\n    'No critical defects open.',\n  ],\n\n  model: 'gpt-5.5',\n};\n\n// Manual test on one ticket: set a key here, then press \"Test workflow\". Ignored on scheduled runs.\nconst testIssueKey = '';\nconfig.searchJql = $('▶ Test run').isExecuted && testIssueKey ? `key = ${testIssueKey}` : config.jql;\nreturn [{ json: config }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ],
+      "id": "c3f015f7-55d5-5b8c-a350-a75fb9d8377a",
+      "name": "⚙️ Config"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('⚙️ Config').first().json.jiraBaseUrl }}/rest/api/3/search/jql",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "jiraSoftwareCloudApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ jql: $('⚙️ Config').first().json.searchJql, maxResults: $('⚙️ Config').first().json.maxIssuesPerRun, fields: ['summary', 'description', 'assignee', ...$('⚙️ Config').first().json.extraRequirementFields] }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        440,
+        0
+      ],
+      "id": "6fb0ebb1-7b96-5ba9-a6fa-3846c383d20d",
+      "name": "Find requirements ready for QA",
+      "credentials": {
+        "jiraSoftwareCloudApi": {
+          "id": "REPLACE_jira",
+          "name": "Jira Cloud account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---- helpers ----\nfunction adfToText(node) {\n  // Jira Cloud (API v3) returns rich text as ADF. This turns it into plain text an LLM can read.\n  if (node == null) return '';\n  if (typeof node === 'string') return node;\n  if (Array.isArray(node)) return node.map(adfToText).join('');\n  switch (node.type) {\n    case 'text': {\n      const link = (node.marks || []).find((m) => m.type === 'link');\n      const href = link?.attrs?.href;\n      return href && href !== node.text ? `${node.text} (${href})` : (node.text || '');\n    }\n    case 'hardBreak': return '\\n';\n    case 'mention': return node.attrs?.text || '@user';\n    case 'emoji': return node.attrs?.text || '';\n    case 'inlineCard':\n    case 'blockCard': return node.attrs?.url || '';\n    case 'media': return '[attachment]';\n    case 'paragraph':\n    case 'heading': return adfToText(node.content) + '\\n';\n    case 'listItem': return '- ' + adfToText(node.content).trim() + '\\n';\n    case 'bulletList':\n    case 'orderedList': return adfToText(node.content) + '\\n';\n    case 'tableRow': return '| ' + (node.content || []).map((c) => adfToText(c.content).trim().replace(/\\n+/g, ' ')).join(' | ') + ' |\\n';\n    case 'codeBlock': return '```\\n' + adfToText(node.content) + '\\n```\\n';\n    case 'rule': return '---\\n';\n    default: return adfToText(node.content);\n  }\n}\n// ---- end helpers ----\n\nconst cfg = $('⚙️ Config').first().json;\nconst issues = $input.first().json.issues || [];\nreturn issues.map((issue) => {\n  const f = issue.fields || {};\n  const extra = (cfg.extraRequirementFields || [])\n    .map((id) => adfToText(f[id]).trim())\n    .filter(Boolean);\n  const requirements = [adfToText(f.description).trim(), ...extra].filter(Boolean).join('\\n\\n');\n  return {\n    json: {\n      key: issue.key,\n      summary: f.summary || '',\n      requirements: requirements || '(no description)',\n      assigneeAccountId: f.assignee?.accountId || '',\n    },\n  };\n});\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        0
+      ],
+      "id": "a7af3dfa-fb1f-548c-aa97-fc2850c52f8d",
+      "name": "Prepare requirement"
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "={{ $('⚙️ Config').first().json.model }}",
+          "mode": "id"
+        },
+        "responses": {
+          "values": [
+            {
+              "role": "system",
+              "content": "You are a senior QA engineer. Write a concise Software Test Plan (STP) for one requirement.\n\nReturn valid JSON only (no markdown, no code fences), exactly in this shape:\n{\"featureName\":\"\",\"featureSummary\":\"\",\"objective\":\"\",\"inScope\":[],\"outOfScope\":[],\"testEnvironment\":[],\"preconditions\":[],\"tests\":[{\"testName\":\"\",\"priority\":3,\"weight\":2}]}\n\nRules:\n- Use only information from the requirement. Do not add scope that is not written. Use the requirement's own terminology.\n- If something required is missing, write a short grounded assumption that starts with \"Assumption:\".\n- featureSummary: 1-2 short sentences. objective: 1 sentence (why the feature is being built).\n- inScope: 3-6 high-level testing areas (not steps, not field validations). outOfScope: 1-3 high-level areas.\n- testEnvironment: minimal concrete lines, e.g. \"Staging\", \"1 Android device\". preconditions: at most 2 short items.\n- tests: high-level test names, as few as cover the key areas and never more than the maximum given. Each test covers exactly one thing; avoid \"and\" / \"&\". Each name must make sense to someone who has not read the requirement. When the requirement describes a full flow (sign-up, purchase, enrolment…), include \"Complete <flow> ...\" tests for its main end-to-end paths.\n- priority: integer 1-3 (3 = highest). weight: integer 1-3, the effort for that single test (1 = quick, 3 = long).\n- No empty or duplicate tests."
+            },
+            {
+              "content": "=Maximum tests: {{ $('⚙️ Config').first().json.maxTests }}\n\nRequirement {{ $json.key }}: {{ $json.summary }}\n\n{{ $json.requirements }}"
+            }
+          ]
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 2.1,
+      "position": [
+        880,
+        0
+      ],
+      "id": "c3400e6e-68dd-54e7-99d4-eb86900f887a",
+      "name": "Write test plan",
+      "credentials": {
+        "openAiApi": {
+          "id": "REPLACE_openai",
+          "name": "OpenAI account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "={{ $('⚙️ Config').first().json.model }}",
+          "mode": "id"
+        },
+        "responses": {
+          "values": [
+            {
+              "role": "system",
+              "content": "You are a light QA reviewer for a generated test plan (STP) in JSON.\n\nCheck whether it reasonably covers the requirement. Fix it ONLY if something critical is wrong:\n- not valid JSON, or required fields missing\n- unrelated to the requirement\n- a major flow or acceptance-critical condition of the requirement is completely missing\n- a test contradicts the requirement\n- priority or weight are not integers 1-3, or there are more tests than the maximum, or tests are empty or unusable\n\nDo NOT change wording, add edge cases, or chase perfection. Keep the original as much as possible.\n\nReturn ONLY the JSON (unchanged if acceptable, corrected if not), in exactly this shape, with no notes, status fields, markdown or code fences:\n{\"featureName\":\"\",\"featureSummary\":\"\",\"objective\":\"\",\"inScope\":[],\"outOfScope\":[],\"testEnvironment\":[],\"preconditions\":[],\"tests\":[{\"testName\":\"\",\"priority\":3,\"weight\":2}]}"
+            },
+            {
+              "content": "=Maximum tests: {{ $('⚙️ Config').first().json.maxTests }}\n\nRequirement {{ $('Prepare requirement').item.json.key }}: {{ $('Prepare requirement').item.json.summary }}\n{{ $('Prepare requirement').item.json.requirements }}\n\nGenerated test plan JSON:\n{{ $json.output?.[0]?.content?.[0]?.text ?? JSON.stringify($json) }}"
+            }
+          ]
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 2.1,
+      "position": [
+        1100,
+        0
+      ],
+      "id": "4fd48e30-7a7b-534d-a1a8-82ccadb8d2d9",
+      "name": "Review test plan",
+      "credentials": {
+        "openAiApi": {
+          "id": "REPLACE_openai",
+          "name": "OpenAI account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// ---- helpers ----\nfunction getLlmText(json) {\n  // Works with the OpenAI \"Message a model\" node and most other model nodes.\n  if (typeof json?.output === 'string') return json.output;\n  if (Array.isArray(json?.output)) {\n    for (const part of json.output) {\n      if (Array.isArray(part?.content)) {\n        const t = part.content.find((c) => c?.text != null);\n        if (t) return typeof t.text === 'string' ? t.text : JSON.stringify(t.text); // JSON output mode returns an object\n      }\n    }\n  }\n  if (typeof json?.text === 'string') return json.text;\n  if (typeof json?.content === 'string') return json.content;\n  if (Array.isArray(json?.content)) {\n    // Anthropic and similar: the text can come after a \"thinking\" block\n    const t = json.content.find((c) => c?.type === 'text' && typeof c.text === 'string');\n    if (t) return t.text;\n  }\n  if (typeof json?.merged_response === 'string' && json.merged_response) return json.merged_response;\n  if (typeof json?.message?.content === 'string') return json.message.content;\n  if (typeof json?.choices?.[0]?.message?.content === 'string') return json.choices[0].message.content;\n  throw new Error('Could not find the text in the model response. Check the model node output.');\n}\n\nfunction parseLlmJson(text) {\n  // Returns the parsed object, or null if the model did not return valid JSON.\n  const cleaned = String(text ?? '').trim().replace(/^```(?:json)?\\s*/i, '').replace(/\\s*```$/, '').trim();\n  try { return JSON.parse(cleaned); } catch (e) { /* try the first {...} block */ }\n  const match = cleaned.match(/\\{[\\s\\S]*\\}/);\n  if (!match) return null;\n  try { return JSON.parse(match[0]); } catch (e) { return null; }\n}\n// ---- end helpers ----\n\n// Checks the plan with code (not just the reviewer model), then renders it as a Jira document.\nconst cfg = $('⚙️ Config').first().json;\nconst req = $('Prepare requirement').item.json;\n\nconst isPlan = (p) => p && typeof p === 'object' && Array.isArray(p.tests) && p.tests.length > 0;\nlet plan = parseLlmJson(getLlmText($json));\nlet source = 'reviewed';\nif (!isPlan(plan)) {\n  plan = parseLlmJson(getLlmText($('Write test plan').item.json));\n  source = 'first draft (the review step did not return valid JSON)';\n}\nif (!isPlan(plan)) {\n  return { json: { ...req, ok: false, problem: 'The model did not return a valid test plan (JSON with at least one test).' } };\n}\n\nconst text = (v, fb = 'Assumption: not specified in the requirement.') => String(v ?? '').trim() || fb;\nconst list = (v) => (Array.isArray(v) ? v : String(v ?? '').split(/\\n|;/))\n  .map((s) => String(s ?? '').replace(/^[-*•]\\s*/, '').trim()).filter(Boolean);\nconst level = (v) => ([1, 2, 3].includes(Number(v)) ? Number(v) : 2);\n\nconst seen = new Set();\nconst tests = plan.tests\n  .map((t) => ({ testName: String(t?.testName ?? '').trim(), priority: level(t?.priority), weight: level(t?.weight) }))\n  .filter((t) => t.testName && !seen.has(t.testName.toLowerCase()) && seen.add(t.testName.toLowerCase()))\n  .slice(0, cfg.maxTests);\n\nconst p = {\n  featureName: text(plan.featureName, req.summary),\n  featureSummary: text(plan.featureSummary),\n  objective: text(plan.objective),\n  inScope: list(plan.inScope),\n  outOfScope: list(plan.outOfScope),\n  testEnvironment: list(plan.testEnvironment),\n  preconditions: list(plan.preconditions),\n  tests,\n};\n\n// ---- Atlassian Document Format (Jira Cloud rich text) ----\nconst t = (s, marks) => (marks ? { type: 'text', text: String(s), marks } : { type: 'text', text: String(s) });\nconst para = (...c) => ({ type: 'paragraph', content: c.length ? c : [] });\nconst bullets = (items) => ({\n  type: 'bulletList',\n  content: (items.length ? items : ['Assumption: not specified in the requirement.'])\n    .map((s) => ({ type: 'listItem', content: [para(t(s))] })),\n});\nconst cell = (content, header = false) => ({ type: header ? 'tableHeader' : 'tableCell', attrs: {}, content: Array.isArray(content) ? content : [para(t(content))] });\nconst row = (cells) => ({ type: 'tableRow', content: cells });\nconst table = (rows) => ({ type: 'table', attrs: { isNumberColumnEnabled: false, layout: 'default' }, content: rows });\nconst heading = (s) => ({ type: 'heading', attrs: { level: 3 }, content: [t(s)] });\nconst reqUrl = `${cfg.jiraBaseUrl}/browse/${req.key}`;\n\nconst description = {\n  type: 'doc', version: 1,\n  content: [\n    para(t('Requirement: '), t(req.key, [{ type: 'link', attrs: { href: reqUrl } }]), t(` — ${req.summary}`)),\n    heading('Description'),\n    table([\n      row([cell('Section', true), cell('Details', true)]),\n      row([cell('Feature name'), cell(p.featureName)]),\n      row([cell('Feature summary'), cell(p.featureSummary)]),\n      row([cell('Objective'), cell(p.objective)]),\n      row([cell('In scope'), cell([bullets(p.inScope)])]),\n      row([cell('Out of scope'), cell([bullets(p.outOfScope)])]),\n      row([cell('Test environment'), cell([bullets(p.testEnvironment)])]),\n      row([cell('Preconditions'), cell([bullets(p.preconditions)])]),\n    ]),\n    { type: 'rule' },\n    heading('Test Coverage and Traceability'),\n    para(t('Priority and weight: 1 = lowest, 3 = highest.')),\n    table([\n      row([cell('Test Name', true), cell('Priority (1-3)', true), cell('Weight (1-3)', true)]),\n      ...p.tests.map((x) => row([cell(x.testName), cell(String(x.priority)), cell(String(x.weight))])),\n    ]),\n    { type: 'rule' },\n    heading('Exit Criteria'),\n    bullets(cfg.exitCriteria || []),\n  ],\n};\n\nconst fields = {\n  project: { key: cfg.testPlan.projectKey },\n  issuetype: { name: cfg.testPlan.issueType },\n  summary: (cfg.testPlan.summaryPrefix + req.summary).slice(0, 254),\n  description,\n  labels: [cfg.labels.testPlan],\n};\nif (cfg.testPlan.copyAssignee && req.assigneeAccountId) fields.assignee = { accountId: req.assigneeAccountId };\n\nreturn { json: { ...req, ok: true, source, testCount: p.tests.length, createBody: { fields } } };\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        0
+      ],
+      "id": "3823fd40-c6dd-5c11-be0e-a0ee3dfd041d",
+      "name": "Validate and render plan"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "0d2db61e-6a84-5897-9730-7061036beb04",
+              "leftValue": "={{ $json.ok }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1540,
+        0
+      ],
+      "id": "649dda57-3438-5c9e-8184-b61b94497ed8",
+      "name": "Valid plan?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('⚙️ Config').first().json.jiraBaseUrl }}/rest/api/3/issue",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "jiraSoftwareCloudApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.createBody) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1760,
+        -100
+      ],
+      "id": "07e652ab-4a88-548d-94dc-744476d881a0",
+      "name": "Create test plan",
+      "credentials": {
+        "jiraSoftwareCloudApi": {
+          "id": "REPLACE_jira",
+          "name": "Jira Cloud account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('⚙️ Config').first().json.jiraBaseUrl }}/rest/api/3/issueLink",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "jiraSoftwareCloudApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ type: { name: $('⚙️ Config').first().json.testPlan.linkType }, inwardIssue: { key: $('Validate and render plan').item.json.key }, outwardIssue: { key: $json.key } }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1980,
+        -100
+      ],
+      "id": "703a5815-0d60-5e71-8ee1-80776d06a97d",
+      "name": "Link to requirement",
+      "credentials": {
+        "jiraSoftwareCloudApi": {
+          "id": "REPLACE_jira",
+          "name": "Jira Cloud account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('⚙️ Config').first().json.jiraBaseUrl }}/rest/api/2/issue/{{ $('Validate and render plan').item.json.key }}/comment",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "jiraSoftwareCloudApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ body: 'Test plan ready for review: [' + $('Create test plan').item.json.key + '|' + $('⚙️ Config').first().json.jiraBaseUrl + '/browse/' + $('Create test plan').item.json.key + '] (' + $('Validate and render plan').item.json.testCount + ' tests).' }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        2200,
+        -100
+      ],
+      "id": "f8e6627a-6c5a-571e-8965-0ec1119afb9e",
+      "name": "Comment on requirement",
+      "credentials": {
+        "jiraSoftwareCloudApi": {
+          "id": "REPLACE_jira",
+          "name": "Jira Cloud account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "={{ $('⚙️ Config').first().json.jiraBaseUrl }}/rest/api/2/issue/{{ $('Validate and render plan').item.json.key }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "jiraSoftwareCloudApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ update: { labels: [{ add: $('⚙️ Config').first().json.labels.requirementDone }] } }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        2420,
+        -100
+      ],
+      "id": "283760d5-8077-5301-bbf3-e0c46140107c",
+      "name": "Label requirement",
+      "credentials": {
+        "jiraSoftwareCloudApi": {
+          "id": "REPLACE_jira",
+          "name": "Jira Cloud account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "4aad9664-f9be-5fcd-8621-adfa84a640ac",
+              "leftValue": "={{ $('⚙️ Config').first().json.testPlan.statusAfterCreate }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2640,
+        -100
+      ],
+      "id": "56a8723a-3a32-5086-b78f-99dc67cb3a9a",
+      "name": "Move test plan?"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('⚙️ Config').first().json.jiraBaseUrl }}/rest/api/3/issue/{{ $('Create test plan').item.json.key }}/transitions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "jiraSoftwareCloudApi",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        2860,
+        -200
+      ],
+      "id": "c5346d64-e371-5dd8-9937-88106baa8f3d",
+      "name": "Get transitions (test plan status)",
+      "credentials": {
+        "jiraSoftwareCloudApi": {
+          "id": "REPLACE_jira",
+          "name": "Jira Cloud account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Finds the transition that leads to the configured status NAME.\nconst key = $('Create test plan').item.json.key;\nconst target = String($('⚙️ Config').first().json.testPlan.statusAfterCreate).trim();\nconst list = $json.transitions || [];\nconst hit = list.find((t) => (t.to?.name || '').toLowerCase() === target.toLowerCase())\n  || list.find((t) => (t.name || '').toLowerCase() === target.toLowerCase());\nif (!hit) {\n  const reachable = list.map((t) => t.to?.name).filter(Boolean).join(', ') || 'none';\n  throw new Error(`Can't move ${key} to \"${target}\": not reachable from its current status (reachable: ${reachable}). Check the status name in ⚙️ Config.`);\n}\nreturn { json: { key, transitionId: hit.id, status: hit.to?.name || target } };\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3080,
+        -200
+      ],
+      "id": "cdaee2fe-d28e-5cc4-8031-d5b13c768426",
+      "name": "Pick transition (test plan status)"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('⚙️ Config').first().json.jiraBaseUrl }}/rest/api/3/issue/{{ $json.key }}/transitions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "jiraSoftwareCloudApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ transition: { id: $json.transitionId } }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        3300,
+        -200
+      ],
+      "id": "bea9fcb1-bea7-5593-b07f-041c12676b2b",
+      "name": "Move to test plan status",
+      "credentials": {
+        "jiraSoftwareCloudApi": {
+          "id": "REPLACE_jira",
+          "name": "Jira Cloud account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('⚙️ Config').first().json.jiraBaseUrl }}/rest/api/2/issue/{{ $json.key }}/comment",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "jiraSoftwareCloudApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ body: 'Automated test plan could not be created: ' + $json.problem + ' A person needs to write or trigger it again (remove the ' + $('⚙️ Config').first().json.labels.needsHuman + ' label to retry).' }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1760,
+        220
+      ],
+      "id": "73c1874f-3ac5-5afb-9865-977f69c5542a",
+      "name": "Explain failure",
+      "credentials": {
+        "jiraSoftwareCloudApi": {
+          "id": "REPLACE_jira",
+          "name": "Jira Cloud account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "={{ $('⚙️ Config').first().json.jiraBaseUrl }}/rest/api/2/issue/{{ $('Validate and render plan').item.json.key }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "jiraSoftwareCloudApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ update: { labels: [{ add: $('⚙️ Config').first().json.labels.needsHuman }] } }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1980,
+        220
+      ],
+      "id": "1d222836-e4b4-55c8-8e6a-14c189bb6972",
+      "name": "Label: needs human",
+      "credentials": {
+        "jiraSoftwareCloudApi": {
+          "id": "REPLACE_jira",
+          "name": "Jira Cloud account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "content": "### Valid plan\nCreate the test plan, link it, tell the requirement, and label the requirement so it gets one plan only.",
+        "height": 408,
+        "width": 1720,
+        "color": 7
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1720,
+        -338
+      ],
+      "id": "beb7635a-0347-5d35-95e9-a8333f1ddca3",
+      "name": "Group: Valid plan"
+    },
+    {
+      "parameters": {
+        "content": "### No valid plan\nTell a person on the requirement. Nothing half-made is created.",
+        "height": 284,
+        "width": 400,
+        "color": 7
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1720,
+        106
+      ],
+      "id": "2b63caec-6c81-512a-9969-9f1e50b056bd",
+      "name": "Group: No valid plan"
+    }
+  ],
+  "connections": {
+    "Get transitions (test plan status)": {
+      "main": [
+        [
+          {
+            "node": "Pick transition (test plan status)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pick transition (test plan status)": {
+      "main": [
+        [
+          {
+            "node": "Move to test plan status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "▶ Test run": {
+      "main": [
+        [
+          {
+            "node": "⚙️ Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "⏰ Every 30 min": {
+      "main": [
+        [
+          {
+            "node": "⚙️ Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "⚙️ Config": {
+      "main": [
+        [
+          {
+            "node": "Find requirements ready for QA",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find requirements ready for QA": {
+      "main": [
+        [
+          {
+            "node": "Prepare requirement",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare requirement": {
+      "main": [
+        [
+          {
+            "node": "Write test plan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write test plan": {
+      "main": [
+        [
+          {
+            "node": "Review test plan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Review test plan": {
+      "main": [
+        [
+          {
+            "node": "Validate and render plan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate and render plan": {
+      "main": [
+        [
+          {
+            "node": "Valid plan?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Valid plan?": {
+      "main": [
+        [
+          {
+            "node": "Create test plan",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Explain failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create test plan": {
+      "main": [
+        [
+          {
+            "node": "Link to requirement",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Link to requirement": {
+      "main": [
+        [
+          {
+            "node": "Comment on requirement",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Comment on requirement": {
+      "main": [
+        [
+          {
+            "node": "Label requirement",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Label requirement": {
+      "main": [
+        [
+          {
+            "node": "Move test plan?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Move test plan?": {
+      "main": [
+        [
+          {
+            "node": "Get transitions (test plan status)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Explain failure": {
+      "main": [
+        [
+          {
+            "node": "Label: needs human",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": []
+}

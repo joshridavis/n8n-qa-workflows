@@ -1,0 +1,1314 @@
+{
+  "name": "AI Test Case Generator – Jira + Xray",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## AI Test Case Generator – Jira + Xray\n\n### How it works\nEvery 30 minutes it takes one Jira test plan and writes one runnable end-to-end test case for it.\n1. Reads the plan and, optionally, the issues linked to it.\n2. A model writes the steps as a table and maps them to the plan's tests (\"STP section N\").\n3. Code checks the table: exact columns, no empty steps, valid and unique sections, every test in the plan covered.\n4. A second model call reviews it. Any failure goes back to step 2 with the exact problems, up to `maxAttempts`.\n5. Only a passing test case is created: steps go to Xray Cloud, or into the description as a table.\n\nIf no attempt passes, it explains on the plan, adds `ai-test-case-failed` and fails the run, so your error workflow alerts you.\n\n### Setup\n1. Add **Jira Software Cloud API** and **OpenAI** credentials. Select each on one node; n8n applies it to the other nodes.\n2. Xray only: a **Custom Auth** credential with `{\"body\": {\"client_id\": \"...\", \"client_secret\": \"...\"}}` (Jira: Apps → Manage your apps → XRAY: API Keys), selected on **Xray: get token**.\n3. In **⚙️ Config** set your Jira URL, JQL and `testManagement` (`xray` or `jira`).\n4. Optional: `testIssueKey` + **Test workflow**. Then Activate (n8n 2.x: **Publish**).",
+        "height": 795,
+        "width": 500
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -560,
+        -460
+      ],
+      "id": "697b703b-8423-52c4-adc1-6d67915b4d42",
+      "name": "📘 About"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -100
+      ],
+      "id": "21e65a6f-77eb-58c5-9e28-62231cdf351f",
+      "name": "▶ Test run"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 30
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        0,
+        100
+      ],
+      "id": "ce985d1c-1a47-511e-84be-63c02b590705",
+      "name": "⏰ Every 30 min"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ⚙️ CONFIG — the only node you need to edit.\nconst config = {\n  // Your Jira Cloud site. Must match the Jira credential.\n  jiraBaseUrl: 'https://your-company.atlassian.net',\n\n  // Test plans to turn into a test case. One per run.\n  // Keep the label filter: it stops a plan getting two test cases.\n  jql: 'project = QA AND issuetype = \"Test Plan\" AND status = Done AND (labels is EMPTY OR labels not in (ai-test-case-created, ai-test-case-failed)) ORDER BY updated ASC',\n\n  // Where the steps go:\n  //   'xray' → steps are added to an Xray Cloud \"Test\" issue (needs the Xray API key credential)\n  //   'jira' → steps are written as a table in the issue description (no Xray needed)\n  testManagement: 'xray',\n  xrayBaseUrl: 'https://xray.cloud.getxray.app', // EU data residency: 'https://eu.xray.cloud.getxray.app'\n\n  test: {\n    projectKey: 'QA',\n    issueType: 'Test',          // Xray \"Test\"; with testManagement 'jira' e.g. 'Task'\n    summaryPrefix: '(e2e) ',\n    linkType: 'Relates',        // link between the test and its test plan\n    statusAfterCreate: '',      // e.g. 'Done'; '' = leave in the first status\n  },\n\n  // Also read issues linked to the test plan (e.g. the original requirement) as background.\n  useLinkedIssues: true,\n\n  // Write → check → review → fix loop. Total attempts before giving up (each costs 1-2 model calls).\n  maxAttempts: 4,\n\n  labels: {\n    done: 'ai-test-case-created',   // added to the test plan on success\n    failed: 'ai-test-case-failed',  // added to the test plan when no attempt passed\n  },\n\n  model: 'gpt-5.5',\n};\n\n// Manual test on one test plan: set a key here, then press \"Test workflow\". Ignored on scheduled runs.\nconst testIssueKey = '';\nconfig.searchJql = $('▶ Test run').isExecuted && testIssueKey ? `key = ${testIssueKey}` : config.jql;\nreturn [{ json: config }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ],
+      "id": "52a86b65-4e14-5b5d-9e39-286948168eec",
+      "name": "⚙️ Config"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('⚙️ Config').first().json.jiraBaseUrl }}/rest/api/3/search/jql",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "jiraSoftwareCloudApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ jql: $('⚙️ Config').first().json.searchJql, maxResults: 1, fields: ['summary', 'description', 'issuelinks'] }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        440,
+        0
+      ],
+      "id": "b5c88324-3184-5bf8-9dd3-51a7d4bfecc4",
+      "name": "Get next test plan",
+      "credentials": {
+        "jiraSoftwareCloudApi": {
+          "id": "REPLACE_jira",
+          "name": "Jira Cloud account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---- helpers ----\nfunction adfToText(node) {\n  // Jira Cloud (API v3) returns rich text as ADF. This turns it into plain text an LLM can read.\n  if (node == null) return '';\n  if (typeof node === 'string') return node;\n  if (Array.isArray(node)) return node.map(adfToText).join('');\n  switch (node.type) {\n    case 'text': {\n      const link = (node.marks || []).find((m) => m.type === 'link');\n      const href = link?.attrs?.href;\n      return href && href !== node.text ? `${node.text} (${href})` : (node.text || '');\n    }\n    case 'hardBreak': return '\\n';\n    case 'mention': return node.attrs?.text || '@user';\n    case 'emoji': return node.attrs?.text || '';\n    case 'inlineCard':\n    case 'blockCard': return node.attrs?.url || '';\n    case 'media': return '[attachment]';\n    case 'paragraph':\n    case 'heading': return adfToText(node.content) + '\\n';\n    case 'listItem': return '- ' + adfToText(node.content).trim() + '\\n';\n    case 'bulletList':\n    case 'orderedList': return adfToText(node.content) + '\\n';\n    case 'tableRow': return '| ' + (node.content || []).map((c) => adfToText(c.content).trim().replace(/\\n+/g, ' ')).join(' | ') + ' |\\n';\n    case 'codeBlock': return '```\\n' + adfToText(node.content) + '\\n```\\n';\n    case 'rule': return '---\\n';\n    default: return adfToText(node.content);\n  }\n}\n// ---- end helpers ----\n\nconst cfg = $('⚙️ Config').first().json;\nconst issue = ($input.first().json.issues || [])[0];\nif (!issue) return []; // nothing to do this run\nconst f = issue.fields || {};\nconst planText = adfToText(f.description).trim();\n\n// Count the rows of a \"Test Name\" coverage table, if the plan has one.\nlet expectedSections = 0;\nconst lines = planText.split('\\n').map((l) => l.trim());\nconst headerAt = lines.findIndex((l) => /^\\|\\s*test name\\s*\\|/i.test(l));\nif (headerAt >= 0) {\n  for (let i = headerAt + 1; i < lines.length && lines[i].startsWith('|'); i++) expectedSections++;\n}\n\nconst linkedKeys = cfg.useLinkedIssues\n  ? (f.issuelinks || []).map((l) => (l.inwardIssue || l.outwardIssue)?.key).filter(Boolean)\n  : [];\n\nreturn [{\n  json: {\n    key: issue.key,\n    id: issue.id,\n    summary: f.summary || '',\n    planText: planText || '(empty test plan)',\n    expectedSections,\n    linkedKeys: [...new Set(linkedKeys)].slice(0, 5),\n  },\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        0
+      ],
+      "id": "b95daca2-3277-5d92-9df6-6621837d5e50",
+      "name": "Prepare test plan"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "2fe6c44c-a2ca-524f-85e0-a86b1e871191",
+              "leftValue": "={{ $json.linkedKeys.length > 0 }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        880,
+        0
+      ],
+      "id": "ea40cbcc-f683-5605-b85e-4b0299403c2b",
+      "name": "Has linked issues?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('⚙️ Config').first().json.jiraBaseUrl }}/rest/api/3/search/jql",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "jiraSoftwareCloudApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ jql: 'key in (' + $json.linkedKeys.join(',') + ')', maxResults: 5, fields: ['summary', 'description', 'issuetype'] }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1100,
+        -120
+      ],
+      "id": "08234278-fff2-5bb7-93f7-bc95bbfc6ba9",
+      "name": "Get linked issues",
+      "credentials": {
+        "jiraSoftwareCloudApi": {
+          "id": "REPLACE_jira",
+          "name": "Jira Cloud account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---- helpers ----\nfunction adfToText(node) {\n  // Jira Cloud (API v3) returns rich text as ADF. This turns it into plain text an LLM can read.\n  if (node == null) return '';\n  if (typeof node === 'string') return node;\n  if (Array.isArray(node)) return node.map(adfToText).join('');\n  switch (node.type) {\n    case 'text': {\n      const link = (node.marks || []).find((m) => m.type === 'link');\n      const href = link?.attrs?.href;\n      return href && href !== node.text ? `${node.text} (${href})` : (node.text || '');\n    }\n    case 'hardBreak': return '\\n';\n    case 'mention': return node.attrs?.text || '@user';\n    case 'emoji': return node.attrs?.text || '';\n    case 'inlineCard':\n    case 'blockCard': return node.attrs?.url || '';\n    case 'media': return '[attachment]';\n    case 'paragraph':\n    case 'heading': return adfToText(node.content) + '\\n';\n    case 'listItem': return '- ' + adfToText(node.content).trim() + '\\n';\n    case 'bulletList':\n    case 'orderedList': return adfToText(node.content) + '\\n';\n    case 'tableRow': return '| ' + (node.content || []).map((c) => adfToText(c.content).trim().replace(/\\n+/g, ' ')).join(' | ') + ' |\\n';\n    case 'codeBlock': return '```\\n' + adfToText(node.content) + '\\n```\\n';\n    case 'rule': return '---\\n';\n    default: return adfToText(node.content);\n  }\n}\n// ---- end helpers ----\n\nconst plan = $('Prepare test plan').first().json;\nconst issues = $input.first().json.issues || [];\nconst background = issues\n  .filter((i) => !/^test/i.test(i.fields?.issuetype?.name || ''))\n  .map((i) => `${i.key}: ${i.fields?.summary || ''}\\n${adfToText(i.fields?.description).trim()}`)\n  .join('\\n\\n')\n  .slice(0, 12000);\nreturn [{ json: { ...plan, background } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        -120
+      ],
+      "id": "56221c10-c1e2-54fe-b785-fe47fc229bee",
+      "name": "Add background"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Loop entry: first attempt, or a retry carrying the previous draft and what to fix.\nconst s = $input.first().json;\nreturn [{\n  json: {\n    ...s,\n    background: s.background || '',\n    attempt: (s.attempt || 0) + 1,\n    candidate: s.candidate || '',\n    feedback: s.feedback || '',\n  },\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        0
+      ],
+      "id": "ed7c0787-ade6-5477-bf77-454c09abcfb0",
+      "name": "Next attempt"
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "={{ $('⚙️ Config').first().json.model }}",
+          "mode": "id"
+        },
+        "responses": {
+          "values": [
+            {
+              "role": "system",
+              "content": "You write one runnable end-to-end manual test case from a test plan (STP).\n\nOutput ONLY a markdown table with exactly these columns:\n| Step # | Action | Data (optional) | Expected Result | STP Section |\n\nRules:\n- Use only information from the test plan and the background. Use their exact terminology. Do not add scope.\n- Each Action is one explicit instruction that someone new to the system can execute. One action per step.\n- Never combine an action and a verification in one step: split them.\n- Expected Result says what the tester should see after that step.\n- Fill \"Data (optional)\" only when special input is needed.\n- If the plan has a test list (e.g. a Test Coverage and Traceability table), that list is the STP: number its items from top to bottom as STP section 1, STP section 2, ... The test must cover ALL of them.\n- STP Section is exactly \"STP section N\". Fill it only on the step that completes that section; leave it empty on intermediate steps. Each number appears exactly once.\n- One representative example per section is enough; don't list every variant.\n- Never write \"Assumption:\". If a detail is missing, use the most neutral runnable wording.\n- No text before or after the table."
+            },
+            {
+              "content": "={{ $json.attempt === 1 ? 'Write the test case.' : 'Your previous attempt was rejected. Fix it with the minimum changes needed and keep all required STP coverage.\\n\\nPrevious attempt:\\n' + $json.candidate + '\\n\\nWhat must be fixed:\\n' + $json.feedback }}\n\nTest plan {{ $json.key }}: {{ $json.summary }}\n{{ $json.planText }}\n\n{{ $json.background ? 'Background (context only, not extra scope):\\n' + $json.background : '' }}"
+            }
+          ]
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 2.1,
+      "position": [
+        1760,
+        0
+      ],
+      "id": "4960abc8-68d0-5d37-825b-eac6d692c6f0",
+      "name": "Write test case",
+      "credentials": {
+        "openAiApi": {
+          "id": "REPLACE_openai",
+          "name": "OpenAI account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---- helpers ----\nfunction getLlmText(json) {\n  // Works with the OpenAI \"Message a model\" node and most other model nodes.\n  if (typeof json?.output === 'string') return json.output;\n  if (Array.isArray(json?.output)) {\n    for (const part of json.output) {\n      if (Array.isArray(part?.content)) {\n        const t = part.content.find((c) => c?.text != null);\n        if (t) return typeof t.text === 'string' ? t.text : JSON.stringify(t.text); // JSON output mode returns an object\n      }\n    }\n  }\n  if (typeof json?.text === 'string') return json.text;\n  if (typeof json?.content === 'string') return json.content;\n  if (Array.isArray(json?.content)) {\n    // Anthropic and similar: the text can come after a \"thinking\" block\n    const t = json.content.find((c) => c?.type === 'text' && typeof c.text === 'string');\n    if (t) return t.text;\n  }\n  if (typeof json?.merged_response === 'string' && json.merged_response) return json.merged_response;\n  if (typeof json?.message?.content === 'string') return json.message.content;\n  if (typeof json?.choices?.[0]?.message?.content === 'string') return json.choices[0].message.content;\n  throw new Error('Could not find the text in the model response. Check the model node output.');\n}\n// ---- end helpers ----\n\n// Hard rules checked by code, so a confident-sounding but broken table never reaches Jira.\nconst state = $('Next attempt').item.json;\nlet text = '';\ntry { text = getLlmText($json); } catch (e) { text = ''; }\n\nconst errors = [];\nconst lines = text.split('\\n').map((l) => l.trim()).filter((l) => l.startsWith('|'));\nconst cells = (line) => line.replace(/^\\|/, '').replace(/\\|$/, '').split('|').map((c) => c.trim());\nconst expectedHeader = ['step #', 'action', 'data (optional)', 'expected result', 'stp section'];\n\nlet steps = [];\nif (lines.length < 3) {\n  errors.push('Return one markdown table with a header row, a separator row and at least one step.');\n} else {\n  const header = cells(lines[0]).map((c) => c.toLowerCase());\n  if (header.join('|') !== expectedHeader.join('|')) {\n    errors.push('The header must be exactly: | Step # | Action | Data (optional) | Expected Result | STP Section |');\n  }\n  steps = lines.slice(2).map(cells).map((c, i) => {\n    if (c.length !== 5) errors.push(`Row ${i + 1} has ${c.length} columns instead of 5.`);\n    return { action: c[1] || '', data: c[2] || '', result: c[3] || '', section: c[4] || '' };\n  });\n  steps.forEach((s, i) => {\n    if (!s.action) errors.push(`Step ${i + 1} has no action.`);\n    if (!s.result) errors.push(`Step ${i + 1} has no expected result.`);\n  });\n}\nif (/assumption:/i.test(text)) errors.push('Remove every \"Assumption:\" text.');\n\nconst sections = steps.map((s) => s.section).filter(Boolean);\nconst bad = sections.filter((s) => !/^STP section \\d+$/i.test(s));\nif (bad.length) errors.push(`STP Section values must look exactly like \"STP section 3\". Wrong: ${bad.join(', ')}`);\nconst nums = sections.filter((s) => /^STP section \\d+$/i.test(s)).map((s) => Number(s.match(/\\d+/)[0]));\nconst dupes = nums.filter((n, i) => nums.indexOf(n) !== i);\nif (dupes.length) errors.push(`Each STP section may appear only once. Repeated: ${[...new Set(dupes)].join(', ')}`);\n\n// If the plan has a \"Test Name\" coverage table (as made by \"AI Test Plan Generator\"), every row must be covered.\nif (state.expectedSections > 0) {\n  const missing = [];\n  for (let n = 1; n <= state.expectedSections; n++) if (!nums.includes(n)) missing.push(n);\n  if (missing.length) errors.push(`The test plan lists ${state.expectedSections} tests. Missing STP sections: ${missing.join(', ')}`);\n  const extra = nums.filter((n) => n > state.expectedSections);\n  if (extra.length) errors.push(`STP sections ${extra.join(', ')} do not exist in the test plan.`);\n}\n\nreturn { json: { ...state, candidate: text, steps, formatOk: errors.length === 0, feedback: errors.map((e) => `- ${e}`).join('\\n') } };\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1980,
+        0
+      ],
+      "id": "a90e67d6-ad0c-5830-a3bf-c3d3d569f733",
+      "name": "Check format"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "c9d783b3-0f5c-557b-bd3a-6a8b519159d8",
+              "leftValue": "={{ $json.formatOk }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2200,
+        0
+      ],
+      "id": "d2ae17c6-3a29-5dd5-8fd0-06314691e53e",
+      "name": "Format OK?"
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "={{ $('⚙️ Config').first().json.model }}",
+          "mode": "id"
+        },
+        "responses": {
+          "values": [
+            {
+              "role": "system",
+              "content": "You are a pragmatic QA reviewer. Decide whether a generated test case is acceptable for its test plan.\n\nFail ONLY on real blockers:\n- A test in the plan's test list (the STP) is not covered by any step, or a step maps to the wrong STP section.\n- A step is not runnable by someone new to the system, or combines several actions, or combines an action with a verification.\n- Behaviour that the plan does not support at all was invented.\n\nDo NOT fail on wording preferences, concise phrasing, or reasonable setup steps such as opening the app, logging in or navigating to a page.\n\nAnswer format:\n- Acceptable → reply with the single word PASS\n- Not acceptable → reply with FAIL on the first line, then one line per fix, each starting with \"- \". Only real blockers, no praise or analysis."
+            },
+            {
+              "content": "=Test plan {{ $json.key }}: {{ $json.summary }}\n{{ $json.planText }}\n\nTest case to review:\n{{ $json.candidate }}"
+            }
+          ]
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 2.1,
+      "position": [
+        2420,
+        -100
+      ],
+      "id": "6bc8aa6d-5f9d-5e61-8fed-2e1b8f2d5bf1",
+      "name": "AI review",
+      "credentials": {
+        "openAiApi": {
+          "id": "REPLACE_openai",
+          "name": "OpenAI account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---- helpers ----\nfunction getLlmText(json) {\n  // Works with the OpenAI \"Message a model\" node and most other model nodes.\n  if (typeof json?.output === 'string') return json.output;\n  if (Array.isArray(json?.output)) {\n    for (const part of json.output) {\n      if (Array.isArray(part?.content)) {\n        const t = part.content.find((c) => c?.text != null);\n        if (t) return typeof t.text === 'string' ? t.text : JSON.stringify(t.text); // JSON output mode returns an object\n      }\n    }\n  }\n  if (typeof json?.text === 'string') return json.text;\n  if (typeof json?.content === 'string') return json.content;\n  if (Array.isArray(json?.content)) {\n    // Anthropic and similar: the text can come after a \"thinking\" block\n    const t = json.content.find((c) => c?.type === 'text' && typeof c.text === 'string');\n    if (t) return t.text;\n  }\n  if (typeof json?.merged_response === 'string' && json.merged_response) return json.merged_response;\n  if (typeof json?.message?.content === 'string') return json.message.content;\n  if (typeof json?.choices?.[0]?.message?.content === 'string') return json.choices[0].message.content;\n  throw new Error('Could not find the text in the model response. Check the model node output.');\n}\n// ---- end helpers ----\n\nconst state = $('Check format').item.json;\nlet review = '';\ntry { review = getLlmText($json).trim(); } catch (e) { review = ''; }\nconst passed = /^pass\\b/i.test(review);\nconst fixes = review.replace(/^fail\\b[:.]?/i, '').trim();\nreturn { json: { ...state, reviewPassed: passed, feedback: passed ? '' : (fixes || '- The reviewer rejected the test case without details. Re-check every rule.') } };\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2640,
+        -100
+      ],
+      "id": "c3bfbfe9-437b-54ce-9b58-b6e217fb967d",
+      "name": "Read review"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "535e22dd-3e1e-5669-86af-89923ba37c18",
+              "leftValue": "={{ $json.reviewPassed }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2860,
+        -100
+      ],
+      "id": "69d054bb-9e88-5377-a517-e3daeabd4a48",
+      "name": "Passed review?"
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $('⚙️ Config').first().json;\nconst s = $input.first().json;\nreturn [{ json: { ...s, giveUp: s.attempt >= cfg.maxAttempts } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2640,
+        200
+      ],
+      "id": "1fe1aa45-caf5-5124-9928-e197412adad9",
+      "name": "Retry or give up?"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "da9fe052-c016-54b1-b9bf-3ea0592969bb",
+              "leftValue": "={{ !$json.giveUp }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2860,
+        200
+      ],
+      "id": "2bad8f4c-41e7-534b-8f18-c0045b44cc48",
+      "name": "Attempts left?"
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $('⚙️ Config').first().json;\nconst s = $input.first().json;\nconst name = s.summary.replace(/^test plan:\\s*/i, '').replace(/^\\(stp\\)\\s*/i, '');\nconst planUrl = `${cfg.jiraBaseUrl}/browse/${s.key}`;\nconst t = (x, marks) => (marks ? { type: 'text', text: String(x), marks } : { type: 'text', text: String(x || ' ') });\nconst para = (...c) => ({ type: 'paragraph', content: c });\nconst cell = (x, header = false) => ({ type: header ? 'tableHeader' : 'tableCell', attrs: {}, content: [para(t(x))] });\n\nconst content = [para(t('Generated from test plan '), t(s.key, [{ type: 'link', attrs: { href: planUrl } }]), t(`. Passed code checks and review on attempt ${s.attempt}.`))];\nif (cfg.testManagement !== 'xray') {\n  content.push({\n    type: 'table', attrs: { isNumberColumnEnabled: false, layout: 'default' },\n    content: [\n      { type: 'tableRow', content: ['Step', 'Action', 'Data', 'Expected Result', 'STP Section'].map((h) => cell(h, true)) },\n      ...s.steps.map((st, i) => ({ type: 'tableRow', content: [String(i + 1), st.action, st.data, st.result, st.section].map((x) => cell(x)) })),\n    ],\n  });\n}\n\nreturn [{\n  json: {\n    ...s,\n    createBody: {\n      fields: {\n        project: { key: cfg.test.projectKey },\n        issuetype: { name: cfg.test.issueType },\n        summary: (cfg.test.summaryPrefix + name).slice(0, 254),\n        description: { type: 'doc', version: 1, content },\n      },\n    },\n  },\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3080,
+        -200
+      ],
+      "id": "be2aebed-4569-5142-b6c8-56165911fca9",
+      "name": "Build test issue"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('⚙️ Config').first().json.jiraBaseUrl }}/rest/api/3/issue",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "jiraSoftwareCloudApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.createBody) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        3300,
+        -200
+      ],
+      "id": "ec33b5e1-9f1c-5d01-9719-df405caa9804",
+      "name": "Create test issue",
+      "credentials": {
+        "jiraSoftwareCloudApi": {
+          "id": "REPLACE_jira",
+          "name": "Jira Cloud account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('⚙️ Config').first().json.jiraBaseUrl }}/rest/api/3/issueLink",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "jiraSoftwareCloudApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ type: { name: $('⚙️ Config').first().json.test.linkType }, inwardIssue: { key: $('Build test issue').first().json.key }, outwardIssue: { key: $('Create test issue').first().json.key } }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        3520,
+        -200
+      ],
+      "id": "21128776-8b93-589e-bc7a-c6c429e28bec",
+      "name": "Link to test plan",
+      "credentials": {
+        "jiraSoftwareCloudApi": {
+          "id": "REPLACE_jira",
+          "name": "Jira Cloud account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "24dd193c-6c1e-505b-9bad-369c56995b53",
+              "leftValue": "={{ $('⚙️ Config').first().json.testManagement }}",
+              "rightValue": "xray",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        3740,
+        -200
+      ],
+      "id": "c735a226-bd74-5bb5-b81a-c4cb4985a231",
+      "name": "Use Xray?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('⚙️ Config').first().json.xrayBaseUrl }}/api/v2/authenticate",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        3960,
+        -340
+      ],
+      "id": "616f8b10-f15a-5c9e-aa88-2f82755a4c6c",
+      "name": "Xray: get token",
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "REPLACE_xray",
+          "name": "Xray Cloud API key"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "notes": "Credential: Custom Auth with JSON {\"body\": {\"client_id\": \"...\", \"client_secret\": \"...\"}} from Xray → Global settings → API keys. Keeps the secret out of the workflow.",
+      "notesInFlow": false
+    },
+    {
+      "parameters": {
+        "jsCode": "const s = $('Build test issue').first().json;\nconst created = $('Create test issue').first().json;\nconst token = String($input.first().json.data ?? '').trim().replace(/^\"|\"$/g, '');\nif (!token) throw new Error('Xray did not return a token. Check the Xray API key credential and xrayBaseUrl.');\nreturn s.steps.map((st) => ({\n  json: {\n    token,\n    issueId: String(created.id),\n    action: st.action,\n    data: st.data,\n    result: st.result + (st.section ? `\\n\\n_${st.section}_` : ''),\n  },\n}));\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4180,
+        -340
+      ],
+      "id": "bd71848f-a92e-5989-a830-e0b62a067205",
+      "name": "One item per step"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('⚙️ Config').first().json.xrayBaseUrl }}/api/v2/graphql",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $json.token }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ query: 'mutation AddStep($issueId: String!, $action: String!, $data: String, $result: String) { addTestStep(issueId: $issueId, step: { action: $action, data: $data, result: $result }) { id } }', variables: { issueId: $json.issueId, action: $json.action, data: $json.data, result: $json.result } }) }}",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 300
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        4400,
+        -340
+      ],
+      "id": "d4715bf8-e7f5-53e7-baa9-11cdc42e404a",
+      "name": "Xray: add step",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "const failed = $input.all().filter((i) => Array.isArray(i.json.errors) && i.json.errors.length);\nif (failed.length) {\n  throw new Error('Xray rejected some steps: ' + failed.map((i) => i.json.errors.map((e) => e.message).join('; ')).join(' | '));\n}\nreturn [{ json: { stepsAdded: $input.all().length } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4620,
+        -340
+      ],
+      "id": "ec4c55f6-7e76-5ca1-a012-a3e2d8844aa8",
+      "name": "Check Xray results"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('⚙️ Config').first().json.jiraBaseUrl }}/rest/api/2/issue/{{ $('Build test issue').first().json.key }}/comment",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "jiraSoftwareCloudApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ body: 'Test case created: [' + $('Create test issue').first().json.key + '|' + $('⚙️ Config').first().json.jiraBaseUrl + '/browse/' + $('Create test issue').first().json.key + '] — ' + $('Build test issue').first().json.steps.length + ' steps, passed code checks and review on attempt ' + $('Build test issue').first().json.attempt + '.' }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        4840,
+        -200
+      ],
+      "id": "aa42b30b-1273-5644-ac49-8cf42ec934ad",
+      "name": "Comment on test plan",
+      "credentials": {
+        "jiraSoftwareCloudApi": {
+          "id": "REPLACE_jira",
+          "name": "Jira Cloud account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "={{ $('⚙️ Config').first().json.jiraBaseUrl }}/rest/api/2/issue/{{ $('Build test issue').first().json.key }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "jiraSoftwareCloudApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ update: { labels: [{ add: $('⚙️ Config').first().json.labels.done }] } }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        5060,
+        -200
+      ],
+      "id": "ec0a5f8b-adde-5ce6-bd4f-85aabe2c46b6",
+      "name": "Label test plan: done",
+      "credentials": {
+        "jiraSoftwareCloudApi": {
+          "id": "REPLACE_jira",
+          "name": "Jira Cloud account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "bc5fc55d-b8ae-5c50-9621-153742339dd7",
+              "leftValue": "={{ $('⚙️ Config').first().json.test.statusAfterCreate }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        5280,
+        -200
+      ],
+      "id": "f17a7213-e917-50b8-97ee-bae61f28587e",
+      "name": "Move test?"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('⚙️ Config').first().json.jiraBaseUrl }}/rest/api/3/issue/{{ $('Create test issue').first().json.key }}/transitions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "jiraSoftwareCloudApi",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        5500,
+        -300
+      ],
+      "id": "a73fa440-6b86-53e6-94e0-d5abb1393a66",
+      "name": "Get transitions (test status)",
+      "credentials": {
+        "jiraSoftwareCloudApi": {
+          "id": "REPLACE_jira",
+          "name": "Jira Cloud account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Finds the transition that leads to the configured status NAME.\nconst key = $('Create test issue').first().json.key;\nconst target = String($('⚙️ Config').first().json.test.statusAfterCreate).trim();\nconst list = $json.transitions || [];\nconst hit = list.find((t) => (t.to?.name || '').toLowerCase() === target.toLowerCase())\n  || list.find((t) => (t.name || '').toLowerCase() === target.toLowerCase());\nif (!hit) {\n  const reachable = list.map((t) => t.to?.name).filter(Boolean).join(', ') || 'none';\n  throw new Error(`Can't move ${key} to \"${target}\": not reachable from its current status (reachable: ${reachable}). Check the status name in ⚙️ Config.`);\n}\nreturn { json: { key, transitionId: hit.id, status: hit.to?.name || target } };\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5720,
+        -300
+      ],
+      "id": "d366baf1-0d78-586a-95c2-025772b1cb4b",
+      "name": "Pick transition (test status)"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('⚙️ Config').first().json.jiraBaseUrl }}/rest/api/3/issue/{{ $json.key }}/transitions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "jiraSoftwareCloudApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ transition: { id: $json.transitionId } }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        5940,
+        -300
+      ],
+      "id": "1db79a63-5349-5378-b622-c6b0a6434e48",
+      "name": "Move to test status",
+      "credentials": {
+        "jiraSoftwareCloudApi": {
+          "id": "REPLACE_jira",
+          "name": "Jira Cloud account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('⚙️ Config').first().json.jiraBaseUrl }}/rest/api/2/issue/{{ $json.key }}/comment",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "jiraSoftwareCloudApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ body: 'Automated test case was not created: no attempt passed the checks after ' + $json.attempt + ' tries. Last problems found:\\n' + $json.feedback + '\\n\\nRemove the ' + $('⚙️ Config').first().json.labels.failed + ' label to try again.' }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        3080,
+        320
+      ],
+      "id": "8569d307-4cc0-523b-8b0a-b5e09b253a47",
+      "name": "Explain failure",
+      "credentials": {
+        "jiraSoftwareCloudApi": {
+          "id": "REPLACE_jira",
+          "name": "Jira Cloud account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "={{ $('⚙️ Config').first().json.jiraBaseUrl }}/rest/api/2/issue/{{ $('Retry or give up?').first().json.key }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "jiraSoftwareCloudApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ update: { labels: [{ add: $('⚙️ Config').first().json.labels.failed }] } }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        3300,
+        320
+      ],
+      "id": "3f3c7733-331d-5ebf-a321-a6ee0d69c7cf",
+      "name": "Label test plan: failed",
+      "credentials": {
+        "jiraSoftwareCloudApi": {
+          "id": "REPLACE_jira",
+          "name": "Jira Cloud account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "errorMessage": "=No test case for {{ $('Retry or give up?').first().json.key }} after {{ $('Retry or give up?').first().json.attempt }} attempts."
+      },
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        3520,
+        320
+      ],
+      "id": "ee7212a0-69aa-51a4-813c-e6d66c41d477",
+      "name": "Mark run as failed"
+    },
+    {
+      "parameters": {
+        "content": "### Write, check, review, fix\nCode checks the table first (cheap and strict), then a second model reviews it. Problems from either go back to the writer.",
+        "height": 608,
+        "width": 1500,
+        "color": 7
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1500,
+        -238
+      ],
+      "id": "bbf645d7-8480-54f2-b470-dfd60bdac839",
+      "name": "Group: Write, check, review, fix"
+    },
+    {
+      "parameters": {
+        "content": "### Passed\nCreate the test, add the steps (Xray, or a table in the description), report back on the test plan.",
+        "height": 448,
+        "width": 3040,
+        "color": 7
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        3040,
+        -478
+      ],
+      "id": "ffdfb446-133c-5e92-986d-a7ea0377c69c",
+      "name": "Group: Passed"
+    },
+    {
+      "parameters": {
+        "content": "### No attempt passed\nExplain on the plan, label it, and fail the run so the error workflow alerts you.",
+        "height": 308,
+        "width": 620,
+        "color": 7
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        3040,
+        182
+      ],
+      "id": "a40f91cb-0e93-5819-9b28-4b069a5881ec",
+      "name": "Group: No attempt passed"
+    },
+    {
+      "parameters": {
+        "content": "### ⚠️ Xray credential\nCustom Auth with your Xray API key. Not needed when testManagement is 'jira'.",
+        "height": 330,
+        "width": 240,
+        "color": 3
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        3890,
+        -490
+      ],
+      "id": "fd51d80a-a85d-5f23-a829-969d04b4d32a",
+      "name": "Warning: Xray credential"
+    }
+  ],
+  "connections": {
+    "Get transitions (test status)": {
+      "main": [
+        [
+          {
+            "node": "Pick transition (test status)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pick transition (test status)": {
+      "main": [
+        [
+          {
+            "node": "Move to test status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "▶ Test run": {
+      "main": [
+        [
+          {
+            "node": "⚙️ Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "⏰ Every 30 min": {
+      "main": [
+        [
+          {
+            "node": "⚙️ Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "⚙️ Config": {
+      "main": [
+        [
+          {
+            "node": "Get next test plan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get next test plan": {
+      "main": [
+        [
+          {
+            "node": "Prepare test plan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare test plan": {
+      "main": [
+        [
+          {
+            "node": "Has linked issues?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has linked issues?": {
+      "main": [
+        [
+          {
+            "node": "Get linked issues",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Next attempt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get linked issues": {
+      "main": [
+        [
+          {
+            "node": "Add background",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Add background": {
+      "main": [
+        [
+          {
+            "node": "Next attempt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Next attempt": {
+      "main": [
+        [
+          {
+            "node": "Write test case",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write test case": {
+      "main": [
+        [
+          {
+            "node": "Check format",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check format": {
+      "main": [
+        [
+          {
+            "node": "Format OK?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format OK?": {
+      "main": [
+        [
+          {
+            "node": "AI review",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Retry or give up?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI review": {
+      "main": [
+        [
+          {
+            "node": "Read review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read review": {
+      "main": [
+        [
+          {
+            "node": "Passed review?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Passed review?": {
+      "main": [
+        [
+          {
+            "node": "Build test issue",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Retry or give up?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Retry or give up?": {
+      "main": [
+        [
+          {
+            "node": "Attempts left?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Attempts left?": {
+      "main": [
+        [
+          {
+            "node": "Next attempt",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Explain failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Explain failure": {
+      "main": [
+        [
+          {
+            "node": "Label test plan: failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Label test plan: failed": {
+      "main": [
+        [
+          {
+            "node": "Mark run as failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build test issue": {
+      "main": [
+        [
+          {
+            "node": "Create test issue",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create test issue": {
+      "main": [
+        [
+          {
+            "node": "Link to test plan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Link to test plan": {
+      "main": [
+        [
+          {
+            "node": "Use Xray?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Use Xray?": {
+      "main": [
+        [
+          {
+            "node": "Xray: get token",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Comment on test plan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Xray: get token": {
+      "main": [
+        [
+          {
+            "node": "One item per step",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "One item per step": {
+      "main": [
+        [
+          {
+            "node": "Xray: add step",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Xray: add step": {
+      "main": [
+        [
+          {
+            "node": "Check Xray results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Xray results": {
+      "main": [
+        [
+          {
+            "node": "Comment on test plan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Comment on test plan": {
+      "main": [
+        [
+          {
+            "node": "Label test plan: done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Label test plan: done": {
+      "main": [
+        [
+          {
+            "node": "Move test?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Move test?": {
+      "main": [
+        [
+          {
+            "node": "Get transitions (test status)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": []
+}

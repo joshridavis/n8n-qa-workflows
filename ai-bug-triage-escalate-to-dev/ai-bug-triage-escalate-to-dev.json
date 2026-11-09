@@ -1,0 +1,1350 @@
+{
+  "name": "AI Bug Triage – Escalate To Dev",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## AI Bug Triage – Escalate To Dev\n\n### How it works\nEvery 15 minutes it takes one Jira bug labelled `ai-repro-checked` and reads it with its comments.\n1. **Open questions in the comments:** moves it to \"waiting for info\".\n2. **Not a bug:** tags the reporter with a polite explanation and closes it.\n3. **Confirmed bug:** one focused model call per field in ⚙️ Config (summary, steps, expected and actual result, severity, priority, team). Code checks every answer against the allowed values. Then it posts one triage comment, writes the mapped fields and moves the ticket to your dev status.\n\nBelow the confidence threshold, or when a model answer is unusable, it adds `ai-needs-human` and a short note instead of acting.\n\n### Setup\n1. Add **Jira Software Cloud API** and **OpenAI** credentials. Select each on one node; n8n applies it to the other nodes.\n2. In **⚙️ Config** set your Jira URL, JQL, status names, field mapping and teams.\n3. Optional: `testIssueKey` + **Test workflow** to try one ticket.\n4. Activate (n8n 2.x: **Publish**). Pairs with *AI Bug Intake*.\n\n### Customization\nAdd, remove or remap entries in `fields`. Each has its own rules, allowed values, fallback and target Jira field.",
+        "height": 728,
+        "width": 500
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -560,
+        -420
+      ],
+      "id": "fb02f156-3834-54b7-b4ea-a051c58d0fd8",
+      "name": "📘 About"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -100
+      ],
+      "id": "692db5ae-5e07-5abd-8769-71bf9a1e5ef9",
+      "name": "▶ Test run"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 15
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        0,
+        100
+      ],
+      "id": "86aa81a7-f6d5-5925-8bec-884101caf100",
+      "name": "⏰ Every 15 min"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ⚙️ CONFIG — the only node you need to edit.\nconst config = {\n  // Your Jira Cloud site. Must match the Jira credential.\n  jiraBaseUrl: 'https://your-company.atlassian.net',\n\n  // Bugs that passed \"AI Bug Intake\" and still need triage. One ticket per run keeps runs readable.\n  jql: 'project = BUG AND issuetype = Bug AND status = \"Triage\" AND labels = ai-repro-checked AND labels not in (ai-triaged, ai-needs-human) ORDER BY created ASC',\n\n  // Who gets tagged when a ticket is closed: 'reporter' or a user-picker custom field id.\n  requesterField: 'reporter',\n\n  // Below this confidence (0-100) the AI does not act on its own decision: it tags the ticket for a human.\n  confidenceThreshold: 70,\n\n  // Status NAMES as shown on your board.\n  statuses: {\n    waitingForInfo: 'Waiting for info', // open questions in the comments\n    notABug: 'Closed',                  // not a bug (with a polite explanation to the reporter)\n    escalated: 'Ready for Dev',         // confirmed bug, fields filled, handed to developers\n  },\n\n  labels: {\n    triaged: 'ai-triaged',\n    needsHuman: 'ai-needs-human',\n  },\n\n  models: {\n    fast: 'gpt-5.4-mini', // classification and one-line fields\n    smart: 'gpt-5.5',     // steps to reproduce\n  },\n\n  // Fields the AI extracts from the ticket. Every value goes into one triage comment.\n  // target: where to also WRITE the value:\n  //   ''                   → comment only\n  //   'summary'            → the issue summary\n  //   'priority'           → the priority field (values must match your priority names)\n  //   'components'         → the Components field (values must match component names)\n  //   'customfield_XXXXX'  → a custom field (fieldType 'option' for select lists, 'text' otherwise).\n  //                          Find the number in Jira: Settings → Issues → Custom fields → ⋯ → Edit; it's in the URL (id=10050).\n  // allowed: the model must return one of these values, or the field is skipped.\n  // fallback: value to use when the ticket doesn't say (null = leave empty).\n  // Remove a field, or set enabled: false, to stop extracting it.\n  fields: [\n    {\n      key: 'summary', label: 'Summary', target: 'summary', model: 'fast',\n      rules: 'Rewrite the summary in this format: [Environment] - [Area] - [Defect + trigger]. Environment is a short key such as Prod, Staging, QA or Dev (\"Unknown Env\" if not stated). Area is the affected feature, page, API or module in 2-6 words. Defect + trigger states the broken behaviour and when it happens (\"when ...\", \"after ...\", \"on ...\"). Present tense, under 140 characters. No ticket ids, names, dates, severity or priority. Avoid vague words such as issue, problem, bug or does not work.',\n    },\n    {\n      key: 'stepsToReproduce', label: 'Steps to reproduce', target: '', model: 'smart', multiline: true,\n      rules: 'Numbered steps, one per line (\"1. ...\"). One imperative action per step. Only the actions needed to reproduce the bug. No expected or actual result, environment or notes. If steps are not written but the user actions are clearly described, turn those actions into steps.',\n    },\n    {\n      key: 'expectedResult', label: 'Expected result', target: '', model: 'fast',\n      rules: 'What should happen when the steps are performed. One specific sentence in present tense. If it is not stated but is directly implied by the defect, write the intended correct behaviour.',\n    },\n    {\n      key: 'actualResult', label: 'Actual result', target: '', model: 'fast',\n      rules: 'What actually happens. One specific sentence in present tense.',\n    },\n    {\n      key: 'environment', label: 'Environment', target: '', fieldType: 'option', model: 'fast',\n      rules: 'Only if the ticket states it. If several are mentioned, pick the one where the bug was found or reproduced.',\n      allowed: [\n        { value: 'Production', meaning: 'production, prod, live, real customers' },\n        { value: 'Staging', meaning: 'staging, pre-production, QA or test environment, sandbox' },\n      ],\n    },\n    {\n      key: 'setup', label: 'Setup', target: '', model: 'fast',\n      rules: 'Format: OS | Browser | Device, where Device is Desktop or Mobile. Include only the parts the ticket states; drop unknown parts and their separators.',\n    },\n    {\n      key: 'affectedUser', label: 'Affected user', target: '', model: 'fast',\n      rules: 'Identifiers of the affected user or account (user id, email, username, account or customer id) exactly as written. Not the reporter or staff unless they are the affected user. Separate several with \" | \".',\n    },\n    {\n      key: 'url', label: 'URL', target: '', model: 'fast',\n      rules: 'The URL of the page or screen where the bug happens, exactly as written. Not attachments, logs, documentation or Jira links. Separate several with \" | \".',\n    },\n    {\n      key: 'reproductionRate', label: 'Reproduction rate', target: '', model: 'fast',\n      rules: 'The reproduction rate exactly as stated (for example \"3/5\" or \"every time\"). Do not estimate it from vague wording such as sometimes.',\n    },\n    {\n      key: 'severity', label: 'Severity', target: '', fieldType: 'option', model: 'fast', fallback: 'Medium',\n      rules: 'Judge by real user and business impact, affected flow, scope and workaround. Do not pick a higher value just because the ticket sounds urgent.',\n      allowed: [\n        { value: 'Critical', meaning: 'showstopper in production: a core flow is completely blocked or money is being lost, and there is no workaround' },\n        { value: 'High', meaning: 'large impact on a main flow: many users blocked or high support volume; any workaround is hard or manual' },\n        { value: 'Medium', meaning: 'noticeable impact on a main or side flow, but a practical workaround exists' },\n        { value: 'Low', meaning: 'minor inconvenience: cosmetic, wording or layout issues, or rarely used flows' },\n      ],\n    },\n    {\n      key: 'priority', label: 'Priority', target: 'priority', model: 'fast', fallback: 'Medium',\n      rules: 'Priority is fixing order: how soon this should be fixed, based on urgency, business value, scope and workaround. Use severity as context, do not copy it blindly.',\n      allowed: [\n        { value: 'Highest', meaning: 'fix now: blocks a critical production flow or causes major business loss, no practical workaround' },\n        { value: 'High', meaning: 'fix as soon as possible: important flow, many users or a key customer, or only a hard workaround' },\n        { value: 'Medium', meaning: 'important but can wait: limited scope or a clear workaround' },\n        { value: 'Low', meaning: 'nice to have: cosmetic, minor or rarely used' },\n      ],\n    },\n    {\n      key: 'team', label: 'Owning team', target: '', fieldType: 'option', model: 'fast',\n      rules: 'Pick the team that owns the system where the defect occurs, not where it was reported. Replace these example teams with your own.',\n      allowed: [\n        { value: 'Web', meaning: 'the customer-facing website and its pages, forms and flows' },\n        { value: 'Mobile', meaning: 'the iOS or Android app, push notifications, mobile-only behaviour' },\n        { value: 'Backend', meaning: 'APIs, integrations, data sync, database, infrastructure, internal tools' },\n      ],\n    },\n  ],\n};\n\n// Manual test on one ticket: set a key here, then press \"Test workflow\". Ignored on scheduled runs.\nconst testIssueKey = '';\nconfig.searchJql = $('▶ Test run').isExecuted && testIssueKey ? `key = ${testIssueKey}` : config.jql;\nreturn [{ json: config }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ],
+      "id": "88449ead-f4c0-52e6-b5e2-1eb9f2e97458",
+      "name": "⚙️ Config"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('⚙️ Config').first().json.jiraBaseUrl }}/rest/api/3/search/jql",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "jiraSoftwareCloudApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ jql: $('⚙️ Config').first().json.searchJql, maxResults: 1, fields: [...new Set(['summary', 'description', 'reporter', 'labels', $('⚙️ Config').first().json.requesterField])] }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        440,
+        0
+      ],
+      "id": "1caab7e2-7251-55d0-9979-bc43989b604e",
+      "name": "Get next bug to triage",
+      "credentials": {
+        "jiraSoftwareCloudApi": {
+          "id": "REPLACE_jira",
+          "name": "Jira Cloud account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---- helpers ----\nfunction adfToText(node) {\n  // Jira Cloud (API v3) returns rich text as ADF. This turns it into plain text an LLM can read.\n  if (node == null) return '';\n  if (typeof node === 'string') return node;\n  if (Array.isArray(node)) return node.map(adfToText).join('');\n  switch (node.type) {\n    case 'text': {\n      const link = (node.marks || []).find((m) => m.type === 'link');\n      const href = link?.attrs?.href;\n      return href && href !== node.text ? `${node.text} (${href})` : (node.text || '');\n    }\n    case 'hardBreak': return '\\n';\n    case 'mention': return node.attrs?.text || '@user';\n    case 'emoji': return node.attrs?.text || '';\n    case 'inlineCard':\n    case 'blockCard': return node.attrs?.url || '';\n    case 'media': return '[attachment]';\n    case 'paragraph':\n    case 'heading': return adfToText(node.content) + '\\n';\n    case 'listItem': return '- ' + adfToText(node.content).trim() + '\\n';\n    case 'bulletList':\n    case 'orderedList': return adfToText(node.content) + '\\n';\n    case 'tableRow': return '| ' + (node.content || []).map((c) => adfToText(c.content).trim().replace(/\\n+/g, ' ')).join(' | ') + ' |\\n';\n    case 'codeBlock': return '```\\n' + adfToText(node.content) + '\\n```\\n';\n    case 'rule': return '---\\n';\n    default: return adfToText(node.content);\n  }\n}\n\nfunction personFrom(value) {\n  // Works for the reporter field and for single or multi user-picker custom fields.\n  const p = Array.isArray(value) ? value[0] : value;\n  return { accountId: p?.accountId || '', name: p?.displayName || '' };\n}\n// ---- end helpers ----\n\nconst cfg = $('⚙️ Config').first().json;\nconst issue = ($input.first().json.issues || [])[0];\nif (!issue) return []; // nothing to triage this run\nconst f = issue.fields || {};\nconst requester = personFrom(f[cfg.requesterField] ?? f.reporter);\nreturn [{\n  json: {\n    key: issue.key,\n    summary: f.summary || '',\n    description: adfToText(f.description).trim(),\n    requesterAccountId: requester.accountId,\n    requesterName: requester.name,\n  },\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        0
+      ],
+      "id": "55a79964-6ad6-56d9-8bdf-b5195134323d",
+      "name": "Prepare ticket"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('⚙️ Config').first().json.jiraBaseUrl }}/rest/api/3/issue/{{ $json.key }}/comment",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "jiraSoftwareCloudApi",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "orderBy",
+              "value": "created"
+            },
+            {
+              "name": "maxResults",
+              "value": "100"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        880,
+        0
+      ],
+      "id": "b8011bca-234c-53ed-86e3-a5e8ad20af6a",
+      "name": "Get comments",
+      "credentials": {
+        "jiraSoftwareCloudApi": {
+          "id": "REPLACE_jira",
+          "name": "Jira Cloud account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---- helpers ----\nfunction adfToText(node) {\n  // Jira Cloud (API v3) returns rich text as ADF. This turns it into plain text an LLM can read.\n  if (node == null) return '';\n  if (typeof node === 'string') return node;\n  if (Array.isArray(node)) return node.map(adfToText).join('');\n  switch (node.type) {\n    case 'text': {\n      const link = (node.marks || []).find((m) => m.type === 'link');\n      const href = link?.attrs?.href;\n      return href && href !== node.text ? `${node.text} (${href})` : (node.text || '');\n    }\n    case 'hardBreak': return '\\n';\n    case 'mention': return node.attrs?.text || '@user';\n    case 'emoji': return node.attrs?.text || '';\n    case 'inlineCard':\n    case 'blockCard': return node.attrs?.url || '';\n    case 'media': return '[attachment]';\n    case 'paragraph':\n    case 'heading': return adfToText(node.content) + '\\n';\n    case 'listItem': return '- ' + adfToText(node.content).trim() + '\\n';\n    case 'bulletList':\n    case 'orderedList': return adfToText(node.content) + '\\n';\n    case 'tableRow': return '| ' + (node.content || []).map((c) => adfToText(c.content).trim().replace(/\\n+/g, ' ')).join(' | ') + ' |\\n';\n    case 'codeBlock': return '```\\n' + adfToText(node.content) + '\\n```\\n';\n    case 'rule': return '---\\n';\n    default: return adfToText(node.content);\n  }\n}\n// ---- end helpers ----\n\nconst ticket = $('Prepare ticket').first().json;\nconst comments = ($input.first().json.comments || [])\n  .map((c) => {\n    const text = adfToText(c.body).replace(/\\s+/g, ' ').trim();\n    return text ? `[${c.created || ''}] ${c.author?.displayName || 'Unknown'}: ${text}` : null;\n  })\n  .filter(Boolean)\n  .join('\\n\\n');\nreturn [{ json: { ...ticket, comments: comments || '(no comments)' } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        0
+      ],
+      "id": "3e0377ee-2b98-5154-a6fd-fdc9d7d76752",
+      "name": "Add comments to context"
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "={{ $('⚙️ Config').first().json.models.fast }}",
+          "mode": "id"
+        },
+        "responses": {
+          "values": [
+            {
+              "role": "system",
+              "content": "You decide whether a bug ticket's comment thread still has an open item that needs an answer from someone.\n\nReturn true when the newest relevant comments contain anything still waiting for a reply, clarification, confirmation or action. This includes direct or indirect questions, requests for status or details, comments that look unfinished, and template labels left without values (for example \"Production:\", \"Expected:\", \"Actual:\").\nReturn false when every question was answered in later comments, or the comments are only informative, or there are no comments.\n\nFocus on chronological order and on the newest comments. Be robust to informal writing and missing question marks.\n\nReturn valid JSON only, with no markdown:\n{\"unansweredQuestions\": true or false, \"confidence\": 0-100, \"reason\": \"1-2 sentences\"}"
+            },
+            {
+              "content": "=Ticket {{ $json.key }}\n\nComments (oldest first):\n{{ $json.comments }}"
+            }
+          ]
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 2.1,
+      "position": [
+        1320,
+        0
+      ],
+      "id": "0c62b143-cad9-59f6-bfa7-39a53dad1679",
+      "name": "Open questions?",
+      "credentials": {
+        "openAiApi": {
+          "id": "REPLACE_openai",
+          "name": "OpenAI account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---- helpers ----\nfunction getLlmText(json) {\n  // Works with the OpenAI \"Message a model\" node and most other model nodes.\n  if (typeof json?.output === 'string') return json.output;\n  if (Array.isArray(json?.output)) {\n    for (const part of json.output) {\n      if (Array.isArray(part?.content)) {\n        const t = part.content.find((c) => c?.text != null);\n        if (t) return typeof t.text === 'string' ? t.text : JSON.stringify(t.text); // JSON output mode returns an object\n      }\n    }\n  }\n  if (typeof json?.text === 'string') return json.text;\n  if (typeof json?.content === 'string') return json.content;\n  if (Array.isArray(json?.content)) {\n    // Anthropic and similar: the text can come after a \"thinking\" block\n    const t = json.content.find((c) => c?.type === 'text' && typeof c.text === 'string');\n    if (t) return t.text;\n  }\n  if (typeof json?.merged_response === 'string' && json.merged_response) return json.merged_response;\n  if (typeof json?.message?.content === 'string') return json.message.content;\n  if (typeof json?.choices?.[0]?.message?.content === 'string') return json.choices[0].message.content;\n  throw new Error('Could not find the text in the model response. Check the model node output.');\n}\n\nfunction parseLlmJson(text) {\n  // Returns the parsed object, or null if the model did not return valid JSON.\n  const cleaned = String(text ?? '').trim().replace(/^```(?:json)?\\s*/i, '').replace(/\\s*```$/, '').trim();\n  try { return JSON.parse(cleaned); } catch (e) { /* try the first {...} block */ }\n  const match = cleaned.match(/\\{[\\s\\S]*\\}/);\n  if (!match) return null;\n  try { return JSON.parse(match[0]); } catch (e) { return null; }\n}\n// ---- end helpers ----\n\nconst cfg = $('⚙️ Config').first().json;\nconst ticket = $('Add comments to context').first().json;\nconst ai = parseLlmJson(getLlmText($input.first().json));\nconst confidence = Number(ai?.confidence);\nlet route = 'human';\nlet reason = 'The model did not return a usable answer about open questions.';\nif (ai && typeof ai.unansweredQuestions === 'boolean' && Number.isFinite(confidence)) {\n  reason = String(ai.reason || '');\n  if (confidence < cfg.confidenceThreshold) route = 'human';\n  else route = ai.unansweredQuestions ? 'waiting' : 'continue';\n}\nreturn [{ json: { ...ticket, route, check: 'open questions', confidence: Number.isFinite(confidence) ? confidence : null, reason } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        0
+      ],
+      "id": "4c017b66-bb6e-5241-a10b-0071af3df6b6",
+      "name": "Read open-questions check"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "83e715c4-6c8e-5322-aca7-6478937e3c38",
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "continue",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "continue"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "f7d12b49-f157-5f42-9edc-b42564b35f07",
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "waiting",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "waiting"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "d8143b83-5b82-5f7f-8f5c-232a2184279e",
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "human",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "human"
+            }
+          ]
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        1760,
+        0
+      ],
+      "id": "2d69944d-527d-568a-9273-cd8fb14e69f2",
+      "name": "Route: open questions"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('⚙️ Config').first().json.jiraBaseUrl }}/rest/api/3/issue/{{ $('Prepare ticket').first().json.key }}/transitions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "jiraSoftwareCloudApi",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1980,
+        260
+      ],
+      "id": "b607d1ab-0715-5388-8e39-9856e56c0951",
+      "name": "Get transitions (waiting for info)",
+      "credentials": {
+        "jiraSoftwareCloudApi": {
+          "id": "REPLACE_jira",
+          "name": "Jira Cloud account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Finds the transition that leads to the configured status NAME.\nconst key = $('Prepare ticket').first().json.key;\nconst target = String($('⚙️ Config').first().json.statuses.waitingForInfo).trim();\nconst list = $json.transitions || [];\nconst hit = list.find((t) => (t.to?.name || '').toLowerCase() === target.toLowerCase())\n  || list.find((t) => (t.name || '').toLowerCase() === target.toLowerCase());\nif (!hit) {\n  const reachable = list.map((t) => t.to?.name).filter(Boolean).join(', ') || 'none';\n  throw new Error(`Can't move ${key} to \"${target}\": not reachable from its current status (reachable: ${reachable}). Check the status name in ⚙️ Config.`);\n}\nreturn { json: { key, transitionId: hit.id, status: hit.to?.name || target } };\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2200,
+        260
+      ],
+      "id": "b32fdf05-44fa-535a-a847-9a0afc336cd0",
+      "name": "Pick transition (waiting for info)"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('⚙️ Config').first().json.jiraBaseUrl }}/rest/api/3/issue/{{ $json.key }}/transitions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "jiraSoftwareCloudApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ transition: { id: $json.transitionId } }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        2420,
+        260
+      ],
+      "id": "c73ff875-ae0d-5da8-b063-d6a346ef155c",
+      "name": "Move to waiting for info",
+      "credentials": {
+        "jiraSoftwareCloudApi": {
+          "id": "REPLACE_jira",
+          "name": "Jira Cloud account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "={{ $('⚙️ Config').first().json.models.fast }}",
+          "mode": "id"
+        },
+        "responses": {
+          "values": [
+            {
+              "role": "system",
+              "content": "You are a bug triage classifier. Decide whether the ticket describes a software bug.\n\nA bug is unintended behaviour in an existing system, feature, integration, UI, API or workflow: something broken, failing, incorrect, inconsistent, crashing, missing when it should already exist, or behaving differently from what is expected.\n\nNot a bug: feature request, improvement, task or chore, question or support request, configuration or setup request, a data/content issue with no system malfunction, a user mistake with no product malfunction, or not enough information to conclude there is a malfunction.\n\nReview the summary, description and comments together. Comments can confirm, deny or clarify. Ignore priority, urgency and writing quality. If the comments contradict the description, prefer the most specific, evidence-based reading.\n\nIf is_bug is false, write closure_message: 3-4 polite sentences to the person who opened the ticket. Say it does not appear to be a bug, briefly say why, say the ticket is being closed, and end with an invitation to contact the team again with more details if they still have a problem. Do not blame the reporter. Do not mention AI, models, confidence or internal process.\nIf is_bug is true, closure_message is \"\".\n\nReturn valid JSON only, with no markdown:\n{\"is_bug\": true or false, \"confidence\": 0-100, \"reason\": \"1-2 sentences\", \"closure_message\": \"...\"}"
+            },
+            {
+              "content": "=Ticket {{ $json.key }}\nSummary: {{ $json.summary }}\n\nDescription:\n{{ $json.description || '(empty)' }}\n\nComments (oldest first):\n{{ $json.comments }}"
+            }
+          ]
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 2.1,
+      "position": [
+        1980,
+        -100
+      ],
+      "id": "f1669ed5-2ab4-56a6-99c3-3a9346df5e54",
+      "name": "Is it a bug?",
+      "credentials": {
+        "openAiApi": {
+          "id": "REPLACE_openai",
+          "name": "OpenAI account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---- helpers ----\nfunction getLlmText(json) {\n  // Works with the OpenAI \"Message a model\" node and most other model nodes.\n  if (typeof json?.output === 'string') return json.output;\n  if (Array.isArray(json?.output)) {\n    for (const part of json.output) {\n      if (Array.isArray(part?.content)) {\n        const t = part.content.find((c) => c?.text != null);\n        if (t) return typeof t.text === 'string' ? t.text : JSON.stringify(t.text); // JSON output mode returns an object\n      }\n    }\n  }\n  if (typeof json?.text === 'string') return json.text;\n  if (typeof json?.content === 'string') return json.content;\n  if (Array.isArray(json?.content)) {\n    // Anthropic and similar: the text can come after a \"thinking\" block\n    const t = json.content.find((c) => c?.type === 'text' && typeof c.text === 'string');\n    if (t) return t.text;\n  }\n  if (typeof json?.merged_response === 'string' && json.merged_response) return json.merged_response;\n  if (typeof json?.message?.content === 'string') return json.message.content;\n  if (typeof json?.choices?.[0]?.message?.content === 'string') return json.choices[0].message.content;\n  throw new Error('Could not find the text in the model response. Check the model node output.');\n}\n\nfunction parseLlmJson(text) {\n  // Returns the parsed object, or null if the model did not return valid JSON.\n  const cleaned = String(text ?? '').trim().replace(/^```(?:json)?\\s*/i, '').replace(/\\s*```$/, '').trim();\n  try { return JSON.parse(cleaned); } catch (e) { /* try the first {...} block */ }\n  const match = cleaned.match(/\\{[\\s\\S]*\\}/);\n  if (!match) return null;\n  try { return JSON.parse(match[0]); } catch (e) { return null; }\n}\n// ---- end helpers ----\n\nconst cfg = $('⚙️ Config').first().json;\nconst ticket = $('Add comments to context').first().json;\nconst ai = parseLlmJson(getLlmText($input.first().json));\nconst confidence = Number(ai?.confidence);\nconst closure = String(ai?.closure_message || '').trim();\nlet route = 'human';\nlet reason = 'The model did not return a usable bug / not-a-bug answer.';\nif (ai && typeof ai.is_bug === 'boolean' && Number.isFinite(confidence)) {\n  reason = String(ai.reason || '');\n  if (confidence < cfg.confidenceThreshold) route = 'human';\n  else if (ai.is_bug) route = 'bug';\n  else route = closure ? 'notBug' : 'human';\n}\nreturn [{ json: { ...ticket, route, check: 'bug or not', confidence: Number.isFinite(confidence) ? confidence : null, reason, closureMessage: closure } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2200,
+        -100
+      ],
+      "id": "fb6e63b2-c560-59f2-90f5-2e4b711b9921",
+      "name": "Read bug check"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "5e7c813d-882c-573a-a780-70a7bd6a6d69",
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "bug",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "bug"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "415a514f-251e-5ebe-9ba6-8c8b9b1330f0",
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "notBug",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "notBug"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "d8143b83-5b82-5f7f-8f5c-232a2184279e",
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "human",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "human"
+            }
+          ]
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        2420,
+        -100
+      ],
+      "id": "13695596-d0f0-561b-807c-7e0b94ab5ece",
+      "name": "Route: bug or not"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('⚙️ Config').first().json.jiraBaseUrl }}/rest/api/2/issue/{{ $json.key }}/comment",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "jiraSoftwareCloudApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ body: ($json.requesterAccountId ? '[~accountid:' + $json.requesterAccountId + '] ' : '') + $json.closureMessage }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        2640,
+        160
+      ],
+      "id": "cfddb8f6-dacd-57aa-bb5a-eee3bed15345",
+      "name": "Explain and close",
+      "credentials": {
+        "jiraSoftwareCloudApi": {
+          "id": "REPLACE_jira",
+          "name": "Jira Cloud account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('⚙️ Config').first().json.jiraBaseUrl }}/rest/api/3/issue/{{ $('Read bug check').first().json.key }}/transitions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "jiraSoftwareCloudApi",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        2860,
+        160
+      ],
+      "id": "3eceddd6-4305-5d65-a3b2-66b34e5d59fe",
+      "name": "Get transitions (not-a-bug status)",
+      "credentials": {
+        "jiraSoftwareCloudApi": {
+          "id": "REPLACE_jira",
+          "name": "Jira Cloud account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Finds the transition that leads to the configured status NAME.\nconst key = $('Read bug check').first().json.key;\nconst target = String($('⚙️ Config').first().json.statuses.notABug).trim();\nconst list = $json.transitions || [];\nconst hit = list.find((t) => (t.to?.name || '').toLowerCase() === target.toLowerCase())\n  || list.find((t) => (t.name || '').toLowerCase() === target.toLowerCase());\nif (!hit) {\n  const reachable = list.map((t) => t.to?.name).filter(Boolean).join(', ') || 'none';\n  throw new Error(`Can't move ${key} to \"${target}\": not reachable from its current status (reachable: ${reachable}). Check the status name in ⚙️ Config.`);\n}\nreturn { json: { key, transitionId: hit.id, status: hit.to?.name || target } };\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3080,
+        160
+      ],
+      "id": "2c262c14-cff5-5f30-b30a-f66db7fb7a35",
+      "name": "Pick transition (not-a-bug status)"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('⚙️ Config').first().json.jiraBaseUrl }}/rest/api/3/issue/{{ $json.key }}/transitions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "jiraSoftwareCloudApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ transition: { id: $json.transitionId } }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        3300,
+        160
+      ],
+      "id": "64f3bd6e-d760-5ee9-b6f1-35092c45ce63",
+      "name": "Move to not-a-bug status",
+      "credentials": {
+        "jiraSoftwareCloudApi": {
+          "id": "REPLACE_jira",
+          "name": "Jira Cloud account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('⚙️ Config').first().json.jiraBaseUrl }}/rest/api/2/issue/{{ $json.key }}/comment",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "jiraSoftwareCloudApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ body: 'Automated triage needs a person to decide on this ticket (' + $json.check + ', confidence ' + ($json.confidence ?? 'n/a') + '%). ' + ($json.reason || '') }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        2640,
+        540
+      ],
+      "id": "fd6e2d66-2d07-5826-8eb1-054024557e96",
+      "name": "Note for a human",
+      "credentials": {
+        "jiraSoftwareCloudApi": {
+          "id": "REPLACE_jira",
+          "name": "Jira Cloud account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "={{ $('⚙️ Config').first().json.jiraBaseUrl }}/rest/api/2/issue/{{ $('Prepare ticket').first().json.key }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "jiraSoftwareCloudApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ update: { labels: [{ add: $('⚙️ Config').first().json.labels.needsHuman }] } }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        2860,
+        540
+      ],
+      "id": "873675c4-718d-568c-803b-ebb7fdd987e5",
+      "name": "Label: needs human",
+      "credentials": {
+        "jiraSoftwareCloudApi": {
+          "id": "REPLACE_jira",
+          "name": "Jira Cloud account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "// Turns the field list in ⚙️ Config into one LLM call per field (focused prompts are easier to tune).\nconst cfg = $('⚙️ Config').first().json;\nconst t = $input.first().json;\nconst fields = (cfg.fields || []).filter((f) => f.enabled !== false);\nif (!fields.length) throw new Error('No fields enabled in ⚙️ Config → fields.');\nreturn fields.map((f) => {\n  const allowed = Array.isArray(f.allowed) ? f.allowed : [];\n  const allowedText = allowed.length\n    ? 'Return exactly one of these values:\\n' + allowed.map((a) => `- ${a.value}: ${a.meaning || ''}`).join('\\n')\n    : '';\n  return {\n    json: {\n      key: t.key, summary: t.summary, description: t.description, comments: t.comments,\n      field: f.key, label: f.label || f.key, rules: f.rules || '', allowedText,\n      multiline: Boolean(f.multiline),\n      model: cfg.models[f.model || 'fast'] || cfg.models.fast,\n    },\n  };\n});\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2640,
+        -260
+      ],
+      "id": "1dab955e-672f-5f5b-82d2-47d4418a08eb",
+      "name": "One job per field"
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "={{ $json.model }}",
+          "mode": "id"
+        },
+        "responses": {
+          "values": [
+            {
+              "role": "system",
+              "content": "You extract one field from a bug ticket for the team's bug tracker.\n\nRules for every field:\n- Use only information from the ticket summary, description and comments. Do not invent, assume or guess.\n- Return only the value: no field name, explanation, quotes, markdown or code fences.\n- Keep the exact product terms used in the ticket.\n- If the value cannot be determined from the ticket, return exactly: UNKNOWN"
+            },
+            {
+              "content": "=Field: {{ $json.label }}\n{{ $json.rules }}\n{{ $json.multiline ? 'Line breaks are allowed.' : 'Return a single line.' }}\n{{ $json.allowedText }}\n\n--- Ticket {{ $json.key }} ---\nSummary: {{ $json.summary }}\n\nDescription:\n{{ $json.description || '(empty)' }}\n\nComments (oldest first):\n{{ $json.comments }}"
+            }
+          ]
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 2.1,
+      "position": [
+        2860,
+        -260
+      ],
+      "id": "a0bafb8f-1e8f-5398-bdfb-43659b758eca",
+      "name": "Extract field",
+      "credentials": {
+        "openAiApi": {
+          "id": "REPLACE_openai",
+          "name": "OpenAI account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---- helpers ----\nfunction getLlmText(json) {\n  // Works with the OpenAI \"Message a model\" node and most other model nodes.\n  if (typeof json?.output === 'string') return json.output;\n  if (Array.isArray(json?.output)) {\n    for (const part of json.output) {\n      if (Array.isArray(part?.content)) {\n        const t = part.content.find((c) => c?.text != null);\n        if (t) return typeof t.text === 'string' ? t.text : JSON.stringify(t.text); // JSON output mode returns an object\n      }\n    }\n  }\n  if (typeof json?.text === 'string') return json.text;\n  if (typeof json?.content === 'string') return json.content;\n  if (Array.isArray(json?.content)) {\n    // Anthropic and similar: the text can come after a \"thinking\" block\n    const t = json.content.find((c) => c?.type === 'text' && typeof c.text === 'string');\n    if (t) return t.text;\n  }\n  if (typeof json?.merged_response === 'string' && json.merged_response) return json.merged_response;\n  if (typeof json?.message?.content === 'string') return json.message.content;\n  if (typeof json?.choices?.[0]?.message?.content === 'string') return json.choices[0].message.content;\n  throw new Error('Could not find the text in the model response. Check the model node output.');\n}\n// ---- end helpers ----\n\n// Every model answer is checked before it can touch Jira:\n// single-line where required, allowed values only, UNKNOWN → fallback or skipped.\nconst cfg = $('⚙️ Config').first().json;\nconst ticket = $('Read bug check').first().json;\nconst jobs = $('One job per field').all().map((i) => i.json);\nconst answers = $input.all();\nconst byKey = Object.fromEntries((cfg.fields || []).map((f) => [f.key, f]));\n\nconst fields = {};\nconst lines = [];\nconst skipped = [];\n\nanswers.forEach((answer, i) => {\n  const job = jobs[i];\n  const def = byKey[job.field] || {};\n  let value = '';\n  try { value = String(getLlmText(answer.json)); } catch (e) { skipped.push(`${job.label}: no answer`); return; }\n  value = value.trim().replace(/^[\"'`]+|[\"'`]+$/g, '').trim();\n  if (!job.multiline) value = value.replace(/\\s*\\n+\\s*/g, ' ');\n  let note = '';\n  if (!value || /^(unknown|n\\/?a|none)$/i.test(value)) {\n    value = def.fallback || '';\n    if (value) note = ' _(default — not stated in the ticket)_';\n  }\n\n  if (value && Array.isArray(def.allowed) && def.allowed.length) {\n    const hit = def.allowed.find((a) => a.value.toLowerCase() === value.toLowerCase());\n    if (hit) value = hit.value;\n    else {\n      const answered = value.slice(0, 60);\n      value = def.fallback || '';\n      if (!value) { skipped.push(`${job.label}: \"${answered}\" is not an allowed value`); return; }\n      note = ` _(default — the model answered \"${answered}\", which is not an allowed value)_`;\n    }\n  }\n  if (!value) { skipped.push(`${job.label}: not stated in the ticket`); return; }\n\n  lines.push(job.multiline ? `*${job.label}:*\\n${value}` : `*${job.label}:* ${value}${note}`);\n\n  const target = def.target || '';\n  if (!target) return;\n  if (target === 'summary') fields.summary = value.slice(0, 254);\n  else if (target === 'priority') fields.priority = { name: value };\n  else if (target === 'components') fields.components = [{ name: value }];\n  else if (def.fieldType === 'option') fields[target] = { value };\n  else fields[target] = value;\n});\n\nconst comment = [\n  `*Automated triage* — confirmed as a bug (confidence ${ticket.confidence}%). ${ticket.reason}`,\n  '',\n  ...lines,\n  ...(skipped.length ? ['', '_Not filled:_ ' + skipped.join('; ')] : []),\n].join('\\n');\n\nreturn [{\n  json: {\n    key: ticket.key,\n    hasFieldUpdates: Object.keys(fields).length > 0,\n    updateBody: { fields },\n    comment,\n    written: Object.keys(fields),\n    skipped,\n  },\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3080,
+        -260
+      ],
+      "id": "e1bc2dae-6c9f-51d5-8394-1dc57445fc3e",
+      "name": "Validate fields"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "5716ffee-9257-5b72-9804-ea821771c611",
+              "leftValue": "={{ $json.hasFieldUpdates }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        3300,
+        -260
+      ],
+      "id": "d8699773-672b-5c84-8518-046657cd6021",
+      "name": "Fields to write?"
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "={{ $('⚙️ Config').first().json.jiraBaseUrl }}/rest/api/2/issue/{{ $json.key }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "jiraSoftwareCloudApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.updateBody) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        3520,
+        -360
+      ],
+      "id": "b3780859-164a-5ec8-abf1-a56d94df7216",
+      "name": "Write fields",
+      "credentials": {
+        "jiraSoftwareCloudApi": {
+          "id": "REPLACE_jira",
+          "name": "Jira Cloud account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "notes": "Uses API v2 so text fields take plain strings. A field that is not on the issue's edit screen makes Jira reject the update: add it to the screen or clear its target in ⚙️ Config.",
+      "notesInFlow": false
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('⚙️ Config').first().json.jiraBaseUrl }}/rest/api/2/issue/{{ $('Validate fields').first().json.key }}/comment",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "jiraSoftwareCloudApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ body: $('Validate fields').first().json.comment }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        3740,
+        -260
+      ],
+      "id": "5d081adf-6f08-5220-bf51-c487392a24e7",
+      "name": "Post triage comment",
+      "credentials": {
+        "jiraSoftwareCloudApi": {
+          "id": "REPLACE_jira",
+          "name": "Jira Cloud account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('⚙️ Config').first().json.jiraBaseUrl }}/rest/api/3/issue/{{ $('Validate fields').first().json.key }}/transitions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "jiraSoftwareCloudApi",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        3960,
+        -260
+      ],
+      "id": "102efa82-4306-5ecd-9001-4095e72af291",
+      "name": "Get transitions (dev status)",
+      "credentials": {
+        "jiraSoftwareCloudApi": {
+          "id": "REPLACE_jira",
+          "name": "Jira Cloud account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Finds the transition that leads to the configured status NAME.\nconst key = $('Validate fields').first().json.key;\nconst target = String($('⚙️ Config').first().json.statuses.escalated).trim();\nconst list = $json.transitions || [];\nconst hit = list.find((t) => (t.to?.name || '').toLowerCase() === target.toLowerCase())\n  || list.find((t) => (t.name || '').toLowerCase() === target.toLowerCase());\nif (!hit) {\n  const reachable = list.map((t) => t.to?.name).filter(Boolean).join(', ') || 'none';\n  throw new Error(`Can't move ${key} to \"${target}\": not reachable from its current status (reachable: ${reachable}). Check the status name in ⚙️ Config.`);\n}\nreturn { json: { key, transitionId: hit.id, status: hit.to?.name || target } };\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4180,
+        -260
+      ],
+      "id": "8b7942d4-542a-5f0e-a743-8f06b8960cc2",
+      "name": "Pick transition (dev status)"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('⚙️ Config').first().json.jiraBaseUrl }}/rest/api/3/issue/{{ $json.key }}/transitions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "jiraSoftwareCloudApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ transition: { id: $json.transitionId } }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        4400,
+        -260
+      ],
+      "id": "5fbc6e1d-c09e-59c4-99ff-271e11ec01c3",
+      "name": "Move to dev status",
+      "credentials": {
+        "jiraSoftwareCloudApi": {
+          "id": "REPLACE_jira",
+          "name": "Jira Cloud account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "={{ $('⚙️ Config').first().json.jiraBaseUrl }}/rest/api/2/issue/{{ $('Prepare ticket').first().json.key }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "jiraSoftwareCloudApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ update: { labels: [{ add: $('⚙️ Config').first().json.labels.triaged }] } }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        4620,
+        0
+      ],
+      "id": "c63d9678-2730-5cca-9591-39b96f40af1e",
+      "name": "Label: triaged",
+      "credentials": {
+        "jiraSoftwareCloudApi": {
+          "id": "REPLACE_jira",
+          "name": "Jira Cloud account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "content": "### Open questions\nThe thread still waits for an answer, so the ticket goes back to waiting for info. No label: it is checked again after the reply.",
+        "height": 308,
+        "width": 620,
+        "color": 7
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1940,
+        122
+      ],
+      "id": "b32c33fb-ef30-58e1-ae54-39c9d22d068b",
+      "name": "Group: Open questions"
+    },
+    {
+      "parameters": {
+        "content": "### Confirmed bug\nOne model call per configured field. Code validates every value before Jira is updated, then the ticket moves to the dev status.",
+        "height": 408,
+        "width": 1940,
+        "color": 7
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        2600,
+        -498
+      ],
+      "id": "8a00149d-ef22-506e-a44f-a53553a5edfc",
+      "name": "Group: Confirmed bug"
+    },
+    {
+      "parameters": {
+        "content": "### Not a bug\nPolite explanation to the reporter, then close.",
+        "height": 284,
+        "width": 840,
+        "color": 7
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        2600,
+        46
+      ],
+      "id": "04bb405f-f107-5dba-a3f0-8bd835926ba3",
+      "name": "Group: Not a bug"
+    },
+    {
+      "parameters": {
+        "content": "### A person decides\nLow confidence or an unusable model answer: a note on the ticket and the ai-needs-human label.",
+        "height": 308,
+        "width": 400,
+        "color": 7
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        2600,
+        402
+      ],
+      "id": "c964c3c7-b44a-5d02-9de1-8a6ee33ae4b3",
+      "name": "Group: A person decides"
+    }
+  ],
+  "connections": {
+    "Get transitions (waiting for info)": {
+      "main": [
+        [
+          {
+            "node": "Pick transition (waiting for info)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pick transition (waiting for info)": {
+      "main": [
+        [
+          {
+            "node": "Move to waiting for info",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get transitions (not-a-bug status)": {
+      "main": [
+        [
+          {
+            "node": "Pick transition (not-a-bug status)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pick transition (not-a-bug status)": {
+      "main": [
+        [
+          {
+            "node": "Move to not-a-bug status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get transitions (dev status)": {
+      "main": [
+        [
+          {
+            "node": "Pick transition (dev status)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pick transition (dev status)": {
+      "main": [
+        [
+          {
+            "node": "Move to dev status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "▶ Test run": {
+      "main": [
+        [
+          {
+            "node": "⚙️ Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "⏰ Every 15 min": {
+      "main": [
+        [
+          {
+            "node": "⚙️ Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "⚙️ Config": {
+      "main": [
+        [
+          {
+            "node": "Get next bug to triage",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get next bug to triage": {
+      "main": [
+        [
+          {
+            "node": "Prepare ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare ticket": {
+      "main": [
+        [
+          {
+            "node": "Get comments",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get comments": {
+      "main": [
+        [
+          {
+            "node": "Add comments to context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Add comments to context": {
+      "main": [
+        [
+          {
+            "node": "Open questions?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Open questions?": {
+      "main": [
+        [
+          {
+            "node": "Read open-questions check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read open-questions check": {
+      "main": [
+        [
+          {
+            "node": "Route: open questions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route: open questions": {
+      "main": [
+        [
+          {
+            "node": "Is it a bug?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Get transitions (waiting for info)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Note for a human",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is it a bug?": {
+      "main": [
+        [
+          {
+            "node": "Read bug check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read bug check": {
+      "main": [
+        [
+          {
+            "node": "Route: bug or not",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route: bug or not": {
+      "main": [
+        [
+          {
+            "node": "One job per field",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Explain and close",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Note for a human",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Explain and close": {
+      "main": [
+        [
+          {
+            "node": "Get transitions (not-a-bug status)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Move to not-a-bug status": {
+      "main": [
+        [
+          {
+            "node": "Label: triaged",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Note for a human": {
+      "main": [
+        [
+          {
+            "node": "Label: needs human",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "One job per field": {
+      "main": [
+        [
+          {
+            "node": "Extract field",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract field": {
+      "main": [
+        [
+          {
+            "node": "Validate fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate fields": {
+      "main": [
+        [
+          {
+            "node": "Fields to write?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fields to write?": {
+      "main": [
+        [
+          {
+            "node": "Write fields",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Post triage comment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write fields": {
+      "main": [
+        [
+          {
+            "node": "Post triage comment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Post triage comment": {
+      "main": [
+        [
+          {
+            "node": "Get transitions (dev status)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Move to dev status": {
+      "main": [
+        [
+          {
+            "node": "Label: triaged",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": []
+}

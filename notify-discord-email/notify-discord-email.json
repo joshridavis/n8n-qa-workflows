@@ -1,0 +1,283 @@
+{
+  "name": "Notify – Discord + Email",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Notify – Discord + Email\n\n### How it works\nA small sub-workflow that other workflows call to send one alert to Discord and/or email.\nInputs: `subject`, `message` (plain text) and `html` (optional email body). Discord messages are cut to Discord's 2,000-character limit.\n\n### Setup\n1. Add a **Discord Webhook** credential (Server settings → Integrations → Webhooks) and an **SMTP** credential, and select them on the two send nodes.\n2. In **⚙️ Config** turn each channel on or off and set the email addresses.\n3. Click **Test workflow** on *▶ Send a test alert* to check both channels.\n4. **Publish** it (n8n 2.x only calls published sub-workflows; on 1.x Activate is optional).\n\nDon't set *Error Handler – Alert On Failed Workflows* as this workflow's own error workflow: a failing alert would call itself in a loop.",
+        "height": 601,
+        "width": 500
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -620,
+        -360
+      ],
+      "id": "31ff2ba9-3250-598c-89c8-07b21f350899",
+      "name": "📘 About"
+    },
+    {
+      "parameters": {
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "subject"
+            },
+            {
+              "name": "message"
+            },
+            {
+              "name": "html"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        -100
+      ],
+      "id": "65eb000f-197c-52ac-80ec-f43408b9ab18",
+      "name": "When called by another workflow"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        120
+      ],
+      "id": "df6d1769-cfdb-5990-8909-5bec0651785a",
+      "name": "▶ Send a test alert"
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{ json: {\n  subject: 'Test alert from n8n',\n  message: 'If you can read this, notifications work.',\n  html: '<p>If you can read this, <b>notifications work</b>.</p>',\n} }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        120
+      ],
+      "id": "2d7c1cef-1220-5853-be81-bf0c9594d1f6",
+      "name": "Sample alert"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ⚙️ CONFIG — the only node you need to edit.\nconst config = {\n  sendDiscord: true,\n  sendEmail: true,\n  emailFrom: 'n8n@your-company.com',\n  emailTo: 'qa-alerts@your-company.com', // several: 'a@x.com, b@x.com'\n};\n\n// Normalise whatever the caller sent.\nconst input = $input.first().json;\nconst subject = String(input.subject || 'n8n alert').slice(0, 200);\nconst message = String(input.message || '').trim();\nconst escape = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst html = String(input.html || '').trim() || `<p>${escape(message).replace(/\\n/g, '<br>')}</p>`;\n\n// Discord rejects messages over 2,000 characters.\nlet discord = `**${subject}**\\n${message}`;\nif (discord.length > 1990) discord = discord.slice(0, 1980) + '\\n…(cut)';\n\nreturn [{ json: { ...config, subject, message, html, discord } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        0
+      ],
+      "id": "b2598d35-1185-5f0e-9c61-289dd661c74c",
+      "name": "⚙️ Config"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "2796c884-45e8-5618-ba75-74330aa1bec1",
+              "leftValue": "={{ $json.sendDiscord }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        660,
+        -100
+      ],
+      "id": "809cb9ba-4812-5e52-8fcb-747cda3d5cb0",
+      "name": "Discord on?"
+    },
+    {
+      "parameters": {
+        "authentication": "webhook",
+        "content": "={{ $json.discord }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
+      "position": [
+        880,
+        -100
+      ],
+      "id": "88760cf6-a657-5b0a-8447-fa23f08053f7",
+      "name": "Send to Discord",
+      "credentials": {
+        "discordWebhookApi": {
+          "id": "REPLACE_discord",
+          "name": "Discord webhook"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "105ff6f1-17a8-5a36-a76e-8b681a20c20c",
+              "leftValue": "={{ $('⚙️ Config').first().json.sendEmail }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        660,
+        140
+      ],
+      "id": "e97c2434-071f-5734-b0a0-444a07f57c8e",
+      "name": "Email on?"
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $('⚙️ Config').first().json.emailFrom }}",
+        "toEmail": "={{ $('⚙️ Config').first().json.emailTo }}",
+        "subject": "={{ $('⚙️ Config').first().json.subject }}",
+        "html": "={{ $('⚙️ Config').first().json.html }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        880,
+        140
+      ],
+      "id": "4be9fcdf-9313-5077-8548-601756ecb9d1",
+      "name": "Send email",
+      "credentials": {
+        "smtp": {
+          "id": "REPLACE_smtp",
+          "name": "SMTP account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000
+    }
+  ],
+  "connections": {
+    "When called by another workflow": {
+      "main": [
+        [
+          {
+            "node": "⚙️ Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "▶ Send a test alert": {
+      "main": [
+        [
+          {
+            "node": "Sample alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sample alert": {
+      "main": [
+        [
+          {
+            "node": "⚙️ Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "⚙️ Config": {
+      "main": [
+        [
+          {
+            "node": "Discord on?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Email on?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Discord on?": {
+      "main": [
+        [
+          {
+            "node": "Send to Discord",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Email on?": {
+      "main": [
+        [
+          {
+            "node": "Send email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "tags": []
+}

@@ -1,0 +1,155 @@
+{
+  "name": "Error Handler – Alert On Failed Workflows",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Error Handler – Alert On Failed Workflows\n\n### How it works\nRuns whenever a workflow that uses it fails, and sends one alert through *Notify – Discord + Email*: workflow name, failed node, error message, time and a link to the execution. It also catches failures in triggers (for example an expired credential), which have no execution link.\n\n### Setup\n1. Import and set up *Notify – Discord + Email* first.\n2. Open **Send alert** and pick *Notify – Discord + Email* under **Workflow**.\n3. **Publish** this workflow (n8n 2.x only runs published error workflows; on 1.x no activation is needed).\n4. In every workflow you want watched: **Settings → Error workflow → Error Handler – Alert On Failed Workflows**.",
+        "height": 492,
+        "width": 500
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -620,
+        -320
+      ],
+      "id": "f41c463f-f4d0-580e-907c-96182ce3821e",
+      "name": "📘 About"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "4614c0ec-cd99-5456-9ab1-dff69fb9fc74",
+      "name": "On workflow error"
+    },
+    {
+      "parameters": {
+        "jsCode": "// The Error Trigger sends either { execution, workflow } or, when a trigger failed, { trigger, workflow }.\nconst e = $input.first().json;\nconst wfName = e.workflow?.name || 'Unknown workflow';\nconst err = e.execution?.error || e.trigger?.error || {};\nconst message = String(err.message || 'No error message').slice(0, 600);\nconst node = e.execution?.lastNodeExecuted || err.node?.name || (e.trigger ? 'trigger' : 'unknown');\nconst when = new Date().toISOString().replace('T', ' ').slice(0, 19) + ' UTC';\nconst url = e.execution?.url || '';\nconst mode = e.execution?.mode || (e.trigger ? 'trigger' : '');\n\nconst lines = [\n  `Workflow: ${wfName}`,\n  `Failed node: ${node}`,\n  `Error: ${message}`,\n  `When: ${when}${mode ? ` (${mode})` : ''}`,\n  url ? `Execution: ${url}` : 'Execution: none (the trigger itself failed — check its credential or settings)',\n];\nconst esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst html = `<h3>❌ ${esc(wfName)} failed</h3><ul>${lines.slice(1).map((l) => `<li>${esc(l)}</li>`).join('')}</ul>`\n  + (url ? `<p><a href=\"${esc(url)}\">Open the execution</a></p>` : '');\n\nreturn [{ json: { subject: `❌ n8n: ${wfName} failed`, message: lines.join('\\n'), html } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ],
+      "id": "6aaa8fdf-7a84-572b-9c84-67267ad5a311",
+      "name": "Build alert"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "",
+          "mode": "list",
+          "cachedResultName": "Notify – Discord + Email"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "subject": "={{ $json.subject }}",
+            "message": "={{ $json.message }}",
+            "html": "={{ $json.html }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "subject",
+              "displayName": "subject",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "message",
+              "displayName": "message",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "html",
+              "displayName": "html",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        440,
+        0
+      ],
+      "id": "185d5d60-fdf1-504c-b6f9-a3010fe88bc1",
+      "name": "Send alert",
+      "notes": "After importing, select 'Notify – Discord + Email' here.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "content": "### ⚠️ Pick the sub-workflow\nAfter import, select Notify – Discord + Email here.",
+        "height": 330,
+        "width": 240,
+        "color": 3
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        370,
+        -150
+      ],
+      "id": "9d46c3f1-f620-5b06-9a0a-4041c45ddbb3",
+      "name": "Warning: Pick the sub-workflow"
+    }
+  ],
+  "connections": {
+    "On workflow error": {
+      "main": [
+        [
+          {
+            "node": "Build alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build alert": {
+      "main": [
+        [
+          {
+            "node": "Send alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": []
+}
